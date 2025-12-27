@@ -20,7 +20,7 @@ export const applyDeleteLines = (code: string, startLine: number, endLine: numbe
 export const applyInsert = (code: string, lineNum: number, text: string, position: 'before' | 'after'): { newCode: string; success: boolean; msg: string } => {
   const lines = code.split('\n');
   if (lineNum < 1 || lineNum > lines.length + 1) {
-     return { newCode: code, success: false, msg: `Invalid line number: ${lineNum}` };
+    return { newCode: code, success: false, msg: `Invalid line number: ${lineNum}` };
   }
 
   const index = position === 'before' ? lineNum - 1 : lineNum;
@@ -32,9 +32,19 @@ export const readFile = (code: string, start?: number, end?: number): string => 
   const lines = code.split('\n');
   const s = start ? Math.max(0, start - 1) : 0;
   const e = end ? Math.min(lines.length, end) : lines.length;
-  
+
   // Return with line numbers
   return lines.slice(s, e).map((line, idx) => `${s + idx + 1} | ${line}`).join('\n');
+};
+
+/**
+ * Format code with line numbers for context injection
+ * This helps the editor know exact line numbers for insert_after/insert_before operations
+ */
+export const formatCodeWithLineNumbers = (code: string): string => {
+  const lines = code.split('\n');
+  const padding = String(lines.length).length;
+  return lines.map((line, idx) => `${String(idx + 1).padStart(padding, ' ')} | ${line}`).join('\n');
 };
 
 export const applyMultiEdit = (code: string, operations: any[]): { newCode: string; success: boolean; msg: string } => {
@@ -66,14 +76,14 @@ export const applyMultiEdit = (code: string, operations: any[]): { newCode: stri
           res = { newCode: currentCode, success: false, msg: `Invalid action: ${op.action}` };
       }
     } catch (e: any) {
-       res = { newCode: currentCode, success: false, msg: `Exception during op: ${e.message}` };
+      res = { newCode: currentCode, success: false, msg: `Exception during op: ${e.message}` };
     }
 
     if (!res.success) {
-      return { 
+      return {
         newCode: code, // Revert to original if any step fails to maintain integrity
-        success: false, 
-        msg: `Batch failed at step ${i + 1} (${op.action}): ${res.msg}` 
+        success: false,
+        msg: `Batch failed at step ${i + 1} (${op.action}): ${res.msg}`
       };
     }
 

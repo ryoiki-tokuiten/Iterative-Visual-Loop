@@ -1,70 +1,109 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Voxel Architect AI</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              gray: {
-                900: '#111111',
-                800: '#1a1a1a',
-                700: '#2a2a2a',
-              },
-              neon: {
-                blue: '#00f3ff',
-                purple: '#bc13fe',
-                green: '#0aff00'
-              }
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voxel Architect AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            // Professional zinc-based palette
+            surface: {
+              0: '#0a0a0b',
+              1: '#0f0f10',
+              2: '#18181b',
+              3: '#27272a',
+              4: '#3f3f46'
             },
-            fontFamily: {
-              mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', "Liberation Mono", "Courier New", 'monospace'],
+            accent: {
+              DEFAULT: '#10b981',
+              muted: '#059669',
+              subtle: 'rgba(16, 185, 129, 0.1)'
+            },
+            text: {
+              primary: '#fafafa',
+              secondary: '#a1a1aa',
+              muted: '#71717a',
+              dim: '#52525b'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.2s ease-out',
+            'slide-up': 'slideUp 0.3s ease-out',
+            'pulse-subtle': 'pulseSubtle 2s ease-in-out infinite',
+          },
+          keyframes: {
+            fadeIn: {
+              '0%': { opacity: '0' },
+              '100%': { opacity: '1' },
+            },
+            slideUp: {
+              '0%': { opacity: '0', transform: 'translateY(10px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            pulseSubtle: {
+              '0%, 100%': { opacity: '1' },
+              '50%': { opacity: '0.7' },
             }
           }
         }
       }
-    </script>
-    <style>
-      body {
-        background-color: #050505;
-        color: #e5e5e5;
-      }
-      /* Custom Scrollbar */
-      ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-      }
-      ::-webkit-scrollbar-track {
-        background: #1a1a1a; 
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #333; 
-        border-radius: 4px;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: #444; 
-      }
-    </style>
-  <script type="importmap">
-{
-  "imports": {
-    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.31.0",
-    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
-    "react": "https://aistudiocdn.com/react@^19.2.1",
-    "react/": "https://aistudiocdn.com/react@^19.2.1/",
-    "html2canvas": "https://aistudiocdn.com/html2canvas@^1.4.1",
-    "diff": "https://ga.jspm.io/npm:diff@5.2.0/lib/index.mjs"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
+    }
+  </script>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      background-color: #0a0a0b;
+      color: #fafafa;
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #3f3f46;
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #52525b;
+    }
+
+    /* Smooth rendering */
+    * {
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+  </style>
 </head>
-  <body>
-    <div id="root"></div>
+
+<body>
+  <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
 </body>
+
 </html>

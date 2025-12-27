@@ -13,7 +13,10 @@
     "react-dom": "^19.2.1",
     "react": "^19.2.1",
     "html2canvas": "^1.4.1",
-    "diff": "5.2.0"
+    "diff": "5.2.0",
+    "react-icons": "^5.4.0",
+    "react-diff-viewer-continued": "^4.0.5",
+    "prism-react-renderer": "^2.4.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

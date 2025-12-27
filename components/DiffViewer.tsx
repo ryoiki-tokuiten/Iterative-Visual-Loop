@@ -1,54 +1,98 @@
 
-import React, { useMemo } from 'react';
-import * as Diff from 'diff';
+import React from 'react';
+import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued';
 
 interface DiffViewerProps {
   oldCode: string;
   newCode: string;
 }
 
+// Custom styles for the diff viewer
+const diffStyles = {
+  variables: {
+    dark: {
+      diffViewerBackground: '#0f0f10',
+      diffViewerColor: '#a1a1aa',
+      addedBackground: 'rgba(16, 185, 129, 0.1)',
+      addedColor: '#6ee7b7',
+      removedBackground: 'rgba(239, 68, 68, 0.1)',
+      removedColor: '#fca5a5',
+      wordAddedBackground: 'rgba(16, 185, 129, 0.25)',
+      wordRemovedBackground: 'rgba(239, 68, 68, 0.25)',
+      addedGutterBackground: 'rgba(16, 185, 129, 0.15)',
+      removedGutterBackground: 'rgba(239, 68, 68, 0.15)',
+      gutterBackground: '#18181b',
+      gutterBackgroundDark: '#0f0f10',
+      highlightBackground: '#27272a',
+      highlightGutterBackground: '#3f3f46',
+      codeFoldGutterBackground: '#18181b',
+      codeFoldBackground: '#27272a',
+      emptyLineBackground: '#0f0f10',
+      gutterColor: '#71717a',
+      addedGutterColor: '#10b981',
+      removedGutterColor: '#ef4444',
+      codeFoldContentColor: '#a1a1aa',
+      diffViewerTitleBackground: '#18181b',
+      diffViewerTitleColor: '#fafafa',
+      diffViewerTitleBorderColor: '#3f3f46',
+    }
+  },
+  line: {
+    padding: '4px 10px',
+    '&:hover': {
+      background: 'rgba(255, 255, 255, 0.03)',
+    }
+  },
+  gutter: {
+    minWidth: '40px',
+    padding: '0 10px',
+    '&:hover': {
+      cursor: 'pointer',
+    }
+  },
+  marker: {
+    padding: '0 10px',
+  },
+  contentText: {
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: '13px',
+    lineHeight: '1.6',
+  },
+  content: {
+    width: '100%',
+  },
+  wordDiff: {
+    padding: '1px 4px',
+    borderRadius: '3px',
+  },
+  codeFold: {
+    fontSize: '12px',
+  },
+  codeFoldContent: {
+    padding: '8px 12px',
+  },
+};
+
 const DiffViewer: React.FC<DiffViewerProps> = ({ oldCode, newCode }) => {
-  const diffs = useMemo(() => {
-    if (!oldCode) return [{ value: newCode, count: 0, added: false, removed: false }];
-    // @ts-ignore - diff is loaded via importmap
-    return Diff.diffLines(oldCode, newCode);
-  }, [oldCode, newCode]);
+  // If no old code, just show new code as all additions
+  const oldValue = oldCode || '';
+  const newValue = newCode || '';
 
   return (
-    <div className="w-full h-full bg-[#111] overflow-auto font-mono text-xs p-4 rounded-lg border border-gray-800">
-      {diffs.map((part: any, index: number) => {
-        let bgColor = 'transparent';
-        let textColor = '#aaa';
-        let prefix = ' ';
-
-        if (part.added) {
-          bgColor = '#0f3a0f'; // Dark Green bg
-          textColor = '#4ade80'; // Bright Green text
-          prefix = '+';
-        } else if (part.removed) {
-          bgColor = '#3a0f0f'; // Dark Red bg
-          textColor = '#f87171'; // Bright Red text
-          prefix = '-';
-        }
-
-        // We split by newline to render line by line for better formatting
-        const lines = part.value.replace(/\n$/, '').split('\n');
-
-        return (
-          <React.Fragment key={index}>
-             {lines.map((line: string, i: number) => (
-                <div 
-                    key={`${index}-${i}`} 
-                    style={{ backgroundColor: bgColor, color: textColor }}
-                    className="whitespace-pre-wrap flex"
-                >
-                    <span className="w-6 inline-block text-center opacity-50 select-none">{prefix}</span>
-                    <span className="flex-1">{line}</span>
-                </div>
-             ))}
-          </React.Fragment>
-        );
-      })}
+    <div className="w-full h-full overflow-auto bg-surface-1 rounded-lg border border-surface-4">
+      <ReactDiffViewer
+        oldValue={oldValue}
+        newValue={newValue}
+        splitView={false}
+        useDarkTheme={true}
+        compareMethod={DiffMethod.WORDS}
+        styles={diffStyles}
+        showDiffOnly={false}
+        extraLinesSurroundingDiff={3}
+        hideLineNumbers={false}
+        leftTitle="Previous Version"
+        rightTitle="Current Version"
+      />
     </div>
   );
 };
