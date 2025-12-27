@@ -1,0 +1,5 @@
+{
+  "name": "Iterative-Voxel",
+  "description": "A multi-agent system utilizing Gemini 3 Pro and Gemini 3 Pro Image to iteratively generate and refine high-fidelity voxel scenes from images.",
+  "requestFramePermissions": []
+}
