@@ -58,26 +58,35 @@ const CodePreview = forwardRef<CodePreviewHandle, CodePreviewProps>(({ code, onR
     return () => window.removeEventListener('message', handler);
   }, [onRuntimeError, onConsoleLog]);
 
-  // Helper to capture a single frame
-  const captureFrame = async (doc: Document): Promise<HTMLCanvasElement | null> => {
-    let canvas = doc.querySelector('canvas');
-    if (!canvas) return null;
+  // Helper to capture a single frame from the Three.js canvas
+  const captureFrame = async (doc: Document, win: any): Promise<HTMLCanvasElement | null> => {
+    const canvas = doc.querySelector('canvas');
+    if (!canvas) {
+      console.warn('No canvas found in document');
+      return null;
+    }
 
     try {
-      const gl = (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null;
-      if (gl) gl.finish();
+      // Force a render if we have access to scene/camera/renderer
+      if (win?.scene && win?.camera && win?.renderer) {
+        win.renderer.render(win.scene, win.camera);
+      }
 
-      // Create a temporary canvas to draw the result
+      // Wait for the frame to actually be drawn
+      await new Promise(resolve => requestAnimationFrame(resolve));
+
+      // Create a temporary canvas to copy the content
       const tempCanvas = document.createElement('canvas');
       tempCanvas.width = canvas.width;
       tempCanvas.height = canvas.height;
       const ctx = tempCanvas.getContext('2d');
       if (!ctx) return null;
 
+      // Draw the WebGL canvas content
       ctx.drawImage(canvas, 0, 0);
       return tempCanvas;
     } catch (e) {
-      console.error("Frame capture failed", e);
+      console.error('Frame capture failed:', e);
       return null;
     }
   };
@@ -125,20 +134,27 @@ const CodePreview = forwardRef<CodePreviewHandle, CodePreviewProps>(({ code, onR
 
           for (const view of activeViews) {
             if (!view.restore) {
+              // Set camera position and target
               if (view.position) win.camera.position.set(view.position[0], view.position[1], view.position[2]);
               if (view.target) win.camera.lookAt(view.target[0], view.target[1], view.target[2]);
               win.camera.updateProjectionMatrix();
-              if (win.controls) win.controls.update();
-
-              // Render explicitly
-              if (win.scene && win.camera) {
-                win.renderer.render(win.scene, win.camera);
+              if (win.controls) {
+                win.controls.target.set(view.target?.[0] || 0, view.target?.[1] || 0, view.target?.[2] || 0);
+                win.controls.update();
               }
-              // Wait a tick for shadows/buffers
-              await new Promise(r => setTimeout(r, 100));
             }
 
-            const cap = await captureFrame(doc);
+            // Force render and wait for shadow maps to update
+            if (win.scene && win.camera && win.renderer) {
+              // Render twice to ensure shadow maps are computed
+              win.renderer.render(win.scene, win.camera);
+              await new Promise(r => setTimeout(r, 50));
+              win.renderer.render(win.scene, win.camera);
+            }
+
+            // Wait for frame and then capture
+            await new Promise(r => setTimeout(r, 100));
+            const cap = await captureFrame(doc, win);
             if (cap) capturedCanvases.push(cap);
           }
 
@@ -188,7 +204,7 @@ const CodePreview = forwardRef<CodePreviewHandle, CodePreviewProps>(({ code, onR
       }
 
       // Fallback: Simple Single Screenshot
-      const singleCap = await captureFrame(doc);
+      const singleCap = await captureFrame(doc, win);
       if (singleCap) {
         return singleCap.toDataURL('image/png').split(',')[1];
       }
