@@ -1,5 +1,6 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
 import {
     AgentType,
     WorkflowStatus,
@@ -11,7 +12,8 @@ import {
 import {
     runCodeAgent,
     runGapFinder,
-    runEditorStepRaw
+    runEditorStepRaw,
+    runEditorStepStreaming
 } from './services/gemini';
 import { applyMultiEdit, readFile, formatCodeWithLineNumbers } from './utils/editorTools';
 import CodePreview, { CodePreviewHandle } from './components/CodePreview';
@@ -60,6 +62,7 @@ export default function App() {
     const [viewingVersionId, setViewingVersionId] = useState<number | null>(null);
 
     const [editorTodo, setEditorTodo] = useState<TodoItem[]>([]);
+    const editorTodoRef = useRef<TodoItem[]>([]);
     const [apiKeyMissing, setApiKeyMissing] = useState(false);
     const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
     const [selectedArtifact, setSelectedArtifact] = useState<GeneratedArtifact | null>(null);
@@ -67,10 +70,12 @@ export default function App() {
     const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
 
     const [viewMode, setViewMode] = useState<ViewMode>('preview');
+    const [streamingThought, setStreamingThought] = useState<string>('');
 
     const previewRef = useRef<CodePreviewHandle>(null);
     const latestRuntimeErrorRef = useRef<string | null>(null);
     const isLoopingRef = useRef(false);
+    const activityRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (!process.env.API_KEY) {
@@ -78,8 +83,49 @@ export default function App() {
         }
     }, []);
 
+    // Keep ref in sync with state for synchronous access
+    useEffect(() => {
+        editorTodoRef.current = editorTodo;
+    }, [editorTodo]);
+
+    // Build todo context string for agent (no emojis)
+    const buildTodoContextString = (todos: TodoItem[]): string => {
+        if (todos.length === 0) {
+            return "[TODO LIST] No tasks yet. Create a todo_list to plan your work.";
+        }
+        const lines = todos.map((t, i) => {
+            const icon = t.status === 'done' ? '[x]' : t.status === 'in_progress' ? '[>]' : '[ ]';
+            return `  ${icon} ${i}: ${t.text}`;
+        });
+        const pending = todos.filter(t => t.status !== 'done').length;
+        const done = todos.filter(t => t.status === 'done').length;
+        return `[TODO LIST] ${done}/${todos.length} complete\n${lines.join('\n')}${pending > 0 ? `\n>> ${pending} pending - complete before verify_changes` : '\n>> All done - ready to verify'}`;
+    };
+
+    // Strip old todo lists from history, keeping only the latest
+    const stripOldTodoLists = (history: any[]): any[] => {
+        // Find and strip [TODO LIST] sections from all but the last message
+        return history.map((msg, idx) => {
+            if (idx === history.length - 1) return msg; // Keep latest as-is
+            if (msg.parts) {
+                return {
+                    ...msg,
+                    parts: msg.parts.map((part: any) => {
+                        if (part.text && part.text.includes('[TODO LIST]')) {
+                            // Remove the todo list section
+                            const cleaned = part.text.replace(/\[TODO LIST\][\s\S]*?(?=\n\n|$)/g, '').trim();
+                            return { ...part, text: cleaned || 'OK' };
+                        }
+                        return part;
+                    })
+                };
+            }
+            return msg;
+        });
+    };
+
     const addLog = useCallback((agent: AgentType, message: string, type: LogEntry['type'] = 'info', details?: string, metadata?: any) => {
-        setLogs(prev => [{
+        setLogs(prev => [...prev, {
             id: Math.random().toString(36).substr(2, 9),
             timestamp: Date.now(),
             agent,
@@ -87,7 +133,7 @@ export default function App() {
             type,
             details,
             metadata
-        }, ...prev]);
+        }]);
     }, []);
 
     const handleRuntimeError = useCallback((msg: string) => {
@@ -197,7 +243,7 @@ export default function App() {
                 role: 'user',
                 parts: [
                     { text: PROMPTS.EDITOR_SYSTEM },
-                    { text: `Current Code (WITH LINE NUMBERS - use these for insert_before / insert_after):\n\n${formatCodeWithLineNumbers(loopCode)}` },
+                    { text: `[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]` },
                     { text: "Original Reference Image:" },
                     { inlineData: { mimeType: 'image/png', data: originalImg } }
                 ]
@@ -258,29 +304,59 @@ export default function App() {
             while (editorActive && editorSteps < 20) {
                 editorSteps++;
 
+                // Always update the HTML context at the top with current code
+                editorHistory[0].parts[1] = {
+                    text: `[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]`
+                };
+
                 const lastMsg = editorHistory[editorHistory.length - 1];
                 if (lastMsg.role === 'model') {
+                    // Remind agent of context and current todo state
                     editorHistory.push({
                         role: 'user',
-                        parts: [{ text: "Continue. Remember: You cannot verify until todos are done. Use take_screenshot to check your work." }]
+                        parts: [{ text: `Continue.\n\n${buildTodoContextString(editorTodoRef.current)}\n\nJust a reminder:\n\nThe current updated HTML (the one that's rendered rn) is always visible at the top. Prefer concise large multi-operation edits. You cannot verify until all todos are done.` }]
                     });
                 }
 
-                const response = await runEditorStepRaw(editorHistory);
-                const candidate = response.candidates?.[0];
+                // Strip old todo lists to keep context clean - only latest todo visible
+                editorHistory = stripOldTodoLists(editorHistory);
 
-                if (!candidate) break;
-
+                // Use streaming for real-time thought updates
                 let modelText = "";
-                candidate.content.parts.forEach((p: any) => { if (p.text) modelText += p.text + "\n"; });
+                let functionCall: any = null;
+                let fullResponse: any = null;
+                setStreamingThought('');  // Reset streaming state
+
+                for await (const chunk of runEditorStepStreaming(editorHistory)) {
+                    if (chunk.type === 'thought') {
+                        modelText += chunk.content + "\n\n";
+                        setStreamingThought(prev => prev + chunk.content + "\n\n");
+                    } else if (chunk.type === 'text') {
+                        modelText += chunk.content + "\n";
+                        setStreamingThought(prev => prev + chunk.content + "\n");
+                    } else if (chunk.type === 'functionCall') {
+                        functionCall = chunk.content;
+                    } else if (chunk.type === 'done') {
+                        fullResponse = chunk.content;
+                    }
+
+                    // Auto-scroll activity panel
+                    if (activityRef.current) {
+                        activityRef.current.scrollTop = activityRef.current.scrollHeight;
+                    }
+                }
+
+                // Clear streaming state and add to permanent log
+                setStreamingThought('');
                 if (modelText.trim()) addLog(AgentType.EDITOR, "Thinking...", 'thought', modelText);
+
+                const candidate = fullResponse?.candidates?.[0];
+                if (!candidate) break;
 
                 editorHistory.push({ role: 'model', parts: candidate.content.parts });
 
-                const toolCalls = candidate.content.parts.filter((p: any) => p.functionCall);
-
-                if (toolCalls.length > 0) {
-                    const fc = toolCalls[0].functionCall;
+                if (functionCall) {
+                    const fc = functionCall;
                     const args = fc.args;
                     addLog(AgentType.EDITOR, `${fc.name}`, 'tool_call', undefined, args);
 
@@ -303,10 +379,17 @@ export default function App() {
                         resultMsg = `Lines ${args.start_line || 1}-${args.end_line || 'End'}:\n${content.slice(-5000)}`;
                     }
                     else if (fc.name === 'todo_list') {
-                        if (args.clear) setEditorTodo([]);
+                        const parts: string[] = [];
+                        if (args.clear) {
+                            setEditorTodo([]);
+                            editorTodoRef.current = [];
+                            parts.push('Cleared');
+                        }
                         if (args.add_items) {
-                            setEditorTodo(prev => [...prev, ...args.add_items.map((t: string) => ({ id: Math.random().toString(), text: t, status: 'pending' }))]);
-                            resultMsg = `Added ${args.add_items.length} items.`;
+                            const newItems = args.add_items.map((t: string) => ({ id: Math.random().toString(), text: t, status: 'pending' }));
+                            setEditorTodo(prev => [...prev, ...newItems]);
+                            editorTodoRef.current = [...editorTodoRef.current, ...newItems];
+                            parts.push(`+${args.add_items.length} items`);
                         }
                         if (args.update_items) {
                             setEditorTodo(prev => {
@@ -314,10 +397,12 @@ export default function App() {
                                 args.update_items.forEach((u: any) => {
                                     if (u.index >= 0 && u.index < next.length) next[u.index].status = u.status;
                                 });
+                                editorTodoRef.current = next;
                                 return next;
                             });
-                            resultMsg = "Updated todo items.";
+                            parts.push(`Updated ${args.update_items.length}`);
                         }
+                        resultMsg = `OK: ${parts.join(', ')}. ${buildTodoContextString(editorTodoRef.current)}`;
                     }
                     else if (fc.name === 'take_screenshot') {
                         if (viewMode !== 'preview') setViewMode('preview');
@@ -352,21 +437,20 @@ export default function App() {
                         }
                     }
                     else if (fc.name === 'verify_changes') {
-                        let hasPending = false;
-                        setEditorTodo(prev => {
-                            hasPending = prev.some(t => t.status !== 'done');
-                            return prev;
-                        });
+                        const todos = editorTodoRef.current;
+                        const pending = todos.filter(t => t.status !== 'done');
 
-                        await new Promise(r => setTimeout(r, 100));
-
-                        if (hasPending) {
-                            resultMsg = "ACTION DENIED: You have 'pending' items in your todo list. Complete them and use 'take_screenshot' to verify them BEFORE calling verify_changes.";
+                        if (todos.length === 0) {
+                            resultMsg = "DENIED: Create a todo_list first to plan your work.";
+                            toolFailed = true;
+                            addLog(AgentType.SYSTEM, "Blocked verify - no todo list", 'warning');
+                        } else if (pending.length > 0) {
+                            resultMsg = `DENIED: ${pending.length} tasks pending. Complete all todos first.\n${buildTodoContextString(todos)}`;
                             toolFailed = true;
                             addLog(AgentType.SYSTEM, "Blocked verify - pending tasks", 'warning');
                         } else {
                             editorActive = false;
-                            resultMsg = "Submitting for verification.";
+                            resultMsg = "OK: All tasks complete. Submitting for verification.";
                         }
                     }
 
@@ -425,19 +509,13 @@ export default function App() {
                             <div className="text-xs text-text-muted">Chain of Thought</div>
                         </div>
                     </div>
-                    <div className="ml-9 p-3 bg-surface-2 rounded-lg border border-surface-4 max-h-[400px] overflow-y-auto">
-                        <pre className={`text-sm text-text-secondary leading-relaxed whitespace-pre-wrap font-sans ${!isExpanded && 'line-clamp-6'}`}>
-                            {log.details || log.message}
-                        </pre>
-                        {log.details && log.details.length > 300 && (
-                            <button
-                                onClick={() => toggleLogExpand(log.id)}
-                                className="mt-2 text-xs text-accent hover:text-accent-muted flex items-center gap-1"
-                            >
-                                {isExpanded ? 'Collapse' : 'Expand full response'}
-                                <HiChevronDown className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                            </button>
-                        )}
+                    <div
+                        className="ml-9 p-4 bg-surface-2 rounded-lg border border-surface-4 max-h-[350px] overflow-y-auto scroll-smooth"
+                        ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
+                    >
+                        <div className="prose prose-sm prose-invert max-w-none text-text-secondary [&>p]:mb-3 [&>ul]:mb-3 [&>ol]:mb-3 [&>h1]:text-lg [&>h2]:text-base [&>h3]:text-sm [&>code]:bg-surface-3 [&>code]:px-1 [&>code]:rounded [&>pre]:bg-surface-3 [&>pre]:p-2 [&>pre]:rounded-lg [&>blockquote]:border-l-2 [&>blockquote]:border-accent [&>blockquote]:pl-3 [&>blockquote]:italic">
+                            <ReactMarkdown>{log.details || log.message}</ReactMarkdown>
+                        </div>
                     </div>
                 </div>
             );
@@ -588,17 +666,41 @@ export default function App() {
                 {/* Tab Content */}
                 <div className="flex-1 overflow-y-auto">
                     {activeTab === 'activity' && (
-                        <div className="p-4 space-y-4">
-                            {logs.length === 0 ? (
+                        <div ref={activityRef} className="p-4 space-y-4">
+                            {logs.length === 0 && !streamingThought ? (
                                 <div className="text-center py-12 text-text-muted text-sm">
                                     Activity will appear here once you start generation
                                 </div>
                             ) : (
-                                logs.map((log) => (
-                                    <div key={log.id} className="pb-4 border-b border-surface-3 last:border-0">
-                                        {renderLogEntry(log)}
-                                    </div>
-                                ))
+                                <>
+                                    {logs.map((log) => (
+                                        <div key={log.id} className="pb-4 border-b border-surface-3 last:border-0">
+                                            {renderLogEntry(log)}
+                                        </div>
+                                    ))}
+                                    {/* Streaming thought display - at bottom since newest is at bottom */}
+                                    {streamingThought && (
+                                        <div className="pb-4">
+                                            <div className="flex items-start gap-3 mb-2">
+                                                <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center">
+                                                    <div className="w-2 h-2 bg-amber-500 rounded-full animate-ping" />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <div className="text-sm font-medium text-amber-400">Editor</div>
+                                                    <div className="text-xs text-text-muted">Thinking...</div>
+                                                </div>
+                                            </div>
+                                            <div
+                                                className="ml-9 p-4 bg-surface-2 rounded-lg border border-amber-500/30 max-h-[350px] overflow-y-auto scroll-smooth"
+                                                ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
+                                            >
+                                                <div className="prose prose-sm prose-invert max-w-none text-text-secondary">
+                                                    <ReactMarkdown>{streamingThought}</ReactMarkdown>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </div>
                     )}

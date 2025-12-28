@@ -301,12 +301,59 @@ export async function runEditorStepRaw(
       model: MODEL_TEXT,
       contents: history,
       config: {
-        tools: [{ functionDeclarations: editorTools }]
+        tools: [{ functionDeclarations: editorTools }],
+        thinkingConfig: {
+          thinkingBudget: 62000,
+          includeThoughts: true  // Include thought summaries in response
+        }
       }
     });
 
     return result;
   }, "EditorStep");
+}
+
+// Streaming version - yields chunks of text as they come in
+export async function* runEditorStepStreaming(
+  history: any[]
+): AsyncGenerator<{ type: 'thought' | 'text' | 'functionCall' | 'done', content: any }> {
+  await waitForRateLimit();
+  recordRequest();
+
+  const ai = getAiClient();
+  const stream = await ai.models.generateContentStream({
+    model: MODEL_TEXT,
+    contents: history,
+    config: {
+      tools: [{ functionDeclarations: editorTools }],
+      thinkingConfig: {
+        thinkingBudget: 62000,
+        includeThoughts: true
+      }
+    }
+  });
+
+  let fullResponse: any = null;
+
+  for await (const chunk of stream) {
+    fullResponse = chunk; // Keep track of latest response
+
+    // Check for thoughts in this chunk
+    const parts = chunk.candidates?.[0]?.content?.parts || [];
+    for (const part of parts) {
+      if (part.thought && typeof part.thought === 'string') {
+        yield { type: 'thought', content: part.thought };
+      }
+      if (part.text && typeof part.text === 'string') {
+        yield { type: 'text', content: part.text };
+      }
+      if (part.functionCall) {
+        yield { type: 'functionCall', content: part.functionCall };
+      }
+    }
+  }
+
+  yield { type: 'done', content: fullResponse };
 }
 
 // Export config for UI display
