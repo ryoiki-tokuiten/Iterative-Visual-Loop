@@ -12,6 +12,7 @@ interface CodePreviewProps {
 
 export interface CodePreviewHandle {
   takeScreenshot: () => Promise<string | null>;
+  recordScene: () => Promise<string | null>; // Returns base64 WebM
 }
 
 const CodePreview = forwardRef<CodePreviewHandle, CodePreviewProps>(({ code, onRuntimeError, onConsoleLog }, ref) => {
@@ -221,6 +222,292 @@ const CodePreview = forwardRef<CodePreviewHandle, CodePreviewProps>(({ code, onR
         });
         return capturedCanvas.toDataURL('image/png').split(',')[1];
       } catch (e) {
+        return null;
+      }
+    },
+
+    // Record a scene orbit video (15 seconds, 60 FPS, full 360° orbit)
+    recordScene: async () => {
+      if (!iframeRef.current || !iframeRef.current.contentDocument?.body) {
+        console.error("No iframe content found for recording");
+        return null;
+      }
+
+      const win = iframeRef.current.contentWindow as any;
+      const doc = iframeRef.current.contentDocument;
+
+      // Wait for canvas to appear with timeout
+      let attempts = 0;
+      const maxAttempts = 20;
+      while (!doc.querySelector('canvas') && attempts < maxAttempts) {
+        await new Promise(r => setTimeout(r, 200));
+        attempts++;
+      }
+
+      const canvas = doc.querySelector('canvas') as HTMLCanvasElement;
+      if (!canvas) {
+        console.error("No canvas found for recording after waiting");
+        return null;
+      }
+
+      // Check if we have Three.js scene access
+      if (!win.camera || !win.renderer || !win.scene) {
+        console.warn("No Three.js scene access for recording - missing camera, renderer, or scene globals");
+        return null;
+      }
+
+      let recorder: MediaRecorder | null = null;
+      let animationFrameId: number | null = null;
+
+      try {
+        // Get stream from canvas at 60 FPS for smooth playback
+        const stream = canvas.captureStream(60);
+
+        // Try to use webm codec with best quality, fallback gracefully
+        let mimeType = 'video/webm;codecs=vp9';
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          mimeType = 'video/webm;codecs=vp8';
+        }
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          mimeType = 'video/webm';
+        }
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          mimeType = 'video/mp4';
+        }
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          console.error("No supported video mimeType found for MediaRecorder");
+          return null;
+        }
+
+        recorder = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: 5000000 // 5 Mbps for good quality
+        });
+        const chunks: Blob[] = [];
+
+        recorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            chunks.push(e.data);
+          }
+        };
+
+        recorder.onerror = (e) => {
+          console.error("MediaRecorder error:", e);
+        };
+
+        // Start recording
+        recorder.start(1000); // Collect data every 1 second for safety
+
+        // Save original camera state
+        const origPos = win.camera.position.clone();
+        const origQuat = win.camera.quaternion.clone();
+        const origTarget = win.controls?.target?.clone?.() || { x: 0, y: 0, z: 0 };
+
+        // Calculate scene parameters for fallback
+        const center = win.controls?.target?.clone?.() || { x: 0, y: 0, z: 0 };
+        const baseRadius = Math.sqrt(
+          Math.pow(origPos.x - center.x, 2) +
+          Math.pow(origPos.z - center.z, 2)
+        ) || 20;
+        const baseHeight = origPos.y || 10;
+        const startAngle = Math.atan2(origPos.x - center.x, origPos.z - center.z);
+
+        // Helper: smooth easing function for natural motion
+        const easeInOut = (t: number): number => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+        // Helper: lerp between values
+        const lerp = (a: number, b: number, t: number): number => a + (b - a) * easeInOut(t);
+
+        /*
+         * CAMERA PATH STRATEGY:
+         * 1. If window.inspectionViews is defined by the agent, smoothly transition between each view
+         * 2. Each view gets equal time, with smooth interpolation during transitions
+         * 3. Falls back to a simple orbit if no views are defined
+         */
+
+        const duration = 15000;
+        const startTime = Date.now();
+
+        // Check if agent has defined custom inspection views
+        const customViews = win.inspectionViews && Array.isArray(win.inspectionViews) && win.inspectionViews.length > 0
+          ? win.inspectionViews
+          : null;
+
+        const animate = (): Promise<void> => {
+          return new Promise<void>((resolve, reject) => {
+            const step = () => {
+              try {
+                const elapsed = Date.now() - startTime;
+                if (elapsed >= duration) {
+                  resolve();
+                  return;
+                }
+
+                const t = elapsed / duration; // 0 to 1 over full duration
+
+                if (customViews) {
+                  // Use agent-defined inspection views with smooth transitions
+                  const numViews = customViews.length;
+                  const holdRatio = 0.6; // 60% of time spent at each view, 40% transitioning
+                  const segmentDuration = 1 / numViews;
+
+                  const currentSegment = Math.min(Math.floor(t / segmentDuration), numViews - 1);
+                  const segmentProgress = (t - currentSegment * segmentDuration) / segmentDuration;
+
+                  const currentView = customViews[currentSegment];
+                  const nextView = customViews[Math.min(currentSegment + 1, numViews - 1)];
+
+                  // Get positions with defaults
+                  const currPos = currentView.position || [origPos.x, origPos.y, origPos.z];
+                  const currTarget = currentView.target || [center.x, center.y, center.z];
+                  const nextPos = nextView.position || currPos;
+                  const nextTarget = nextView.target || currTarget;
+
+                  let px: number, py: number, pz: number, tx: number, ty: number, tz: number;
+
+                  if (segmentProgress < holdRatio) {
+                    // Hold at current view
+                    px = currPos[0]; py = currPos[1]; pz = currPos[2];
+                    tx = currTarget[0]; ty = currTarget[1]; tz = currTarget[2];
+                  } else {
+                    // Transition to next view
+                    const transitionT = (segmentProgress - holdRatio) / (1 - holdRatio);
+                    px = lerp(currPos[0], nextPos[0], transitionT);
+                    py = lerp(currPos[1], nextPos[1], transitionT);
+                    pz = lerp(currPos[2], nextPos[2], transitionT);
+                    tx = lerp(currTarget[0], nextTarget[0], transitionT);
+                    ty = lerp(currTarget[1], nextTarget[1], transitionT);
+                    tz = lerp(currTarget[2], nextTarget[2], transitionT);
+                  }
+
+                  win.camera.position.set(px, py, pz);
+                  win.camera.lookAt(tx, ty, tz);
+                } else {
+                  // Fallback: simple orbit around the scene
+                  const angle = startAngle + t * Math.PI * 2;
+                  const verticalOffset = Math.sin(t * Math.PI * 4) * (baseHeight * 0.15);
+
+                  win.camera.position.x = center.x + Math.sin(angle) * baseRadius;
+                  win.camera.position.z = center.z + Math.cos(angle) * baseRadius;
+                  win.camera.position.y = baseHeight + verticalOffset;
+                  win.camera.lookAt(center.x, center.y, center.z);
+                }
+
+                if (win.controls) {
+                  win.controls.update();
+                }
+
+                win.renderer.render(win.scene, win.camera);
+                animationFrameId = requestAnimationFrame(step);
+              } catch (error) {
+                console.error("Animation step error:", error);
+                reject(error);
+              }
+            };
+            animationFrameId = requestAnimationFrame(step);
+          });
+        };
+
+        // Run animation with timeout safety
+        const animationPromise = animate();
+        const timeoutPromise = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("Animation timeout")), duration + 5000)
+        );
+
+        try {
+          await Promise.race([animationPromise, timeoutPromise]);
+        } catch (error) {
+          console.warn("Animation interrupted:", error);
+          // Continue to try to save what we recorded
+        }
+
+        // Cancel any remaining animation frame
+        if (animationFrameId) {
+          cancelAnimationFrame(animationFrameId);
+        }
+
+        // Restore camera
+        try {
+          win.camera.position.copy(origPos);
+          win.camera.quaternion.copy(origQuat);
+          if (win.controls && origTarget) {
+            win.controls.target.set(origTarget.x, origTarget.y, origTarget.z);
+            win.controls.update();
+          }
+          win.renderer.render(win.scene, win.camera);
+        } catch (restoreError) {
+          console.warn("Failed to restore camera:", restoreError);
+        }
+
+        // Stop recording and wait for data with timeout
+        if (recorder.state !== 'inactive') {
+          recorder.stop();
+        }
+
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => {
+            console.warn("Recorder stop timeout, proceeding with collected data");
+            resolve();
+          }, 3000);
+
+          recorder!.onstop = () => {
+            clearTimeout(timeout);
+            resolve();
+          };
+        });
+
+        // Check if we have data
+        if (chunks.length === 0) {
+          console.error("No recording data collected");
+          return null;
+        }
+
+        // Convert to base64
+        const blob = new Blob(chunks, { type: 'video/webm' });
+
+        if (blob.size === 0) {
+          console.error("Empty recording blob");
+          return null;
+        }
+
+        const reader = new FileReader();
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("FileReader timeout")), 30000);
+
+          reader.onloadend = () => {
+            clearTimeout(timeout);
+            const result = reader.result as string;
+            if (result && result.includes(',')) {
+              resolve(result.split(',')[1]); // Remove data URL prefix
+            } else {
+              reject(new Error("Invalid base64 result"));
+            }
+          };
+          reader.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error("FileReader error"));
+          };
+          reader.readAsDataURL(blob);
+        });
+
+        console.log(`Recording complete: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
+        return base64;
+
+      } catch (e) {
+        console.error("Recording failed:", e);
+
+        // Cleanup on error
+        if (animationFrameId) {
+          cancelAnimationFrame(animationFrameId);
+        }
+        if (recorder && recorder.state !== 'inactive') {
+          try {
+            recorder.stop();
+          } catch (stopError) {
+            console.warn("Failed to stop recorder:", stopError);
+          }
+        }
+
         return null;
       }
     }

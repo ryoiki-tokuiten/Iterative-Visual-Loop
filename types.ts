@@ -29,8 +29,9 @@ export interface LogEntry {
 
 export interface GeneratedArtifact {
   id: string;
-  type: 'screenshot';
+  type: 'screenshot' | 'video';
   url: string; // Base64
+  mimeType?: string; // 'image/png' or 'video/webm'
   description: string;
   agent: AgentType;
 }

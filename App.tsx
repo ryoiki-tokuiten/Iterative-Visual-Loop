@@ -102,18 +102,26 @@ export default function App() {
         return `[TODO LIST] ${done}/${todos.length} complete\n${lines.join('\n')}${pending > 0 ? `\n>> ${pending} pending - complete before verify_changes` : '\n>> All done - ready to verify'}`;
     };
 
-    // Strip old todo lists from history, keeping only the latest
-    const stripOldTodoLists = (history: any[]): any[] => {
-        // Find and strip [TODO LIST] sections from all but the last message
+    // Strip old context sections from history, keeping index 0 (initial) and last message (latest)
+    const stripOldContextSections = (history: any[]): any[] => {
         return history.map((msg, idx) => {
-            if (idx === history.length - 1) return msg; // Keep latest as-is
+            // Keep first message (initial HTML) and last message (latest HTML) as-is
+            if (idx === 0 || idx === history.length - 1) return msg;
             if (msg.parts) {
                 return {
                     ...msg,
                     parts: msg.parts.map((part: any) => {
-                        if (part.text && part.text.includes('[TODO LIST]')) {
-                            // Remove the todo list section
-                            const cleaned = part.text.replace(/\[TODO LIST\][\s\S]*?(?=\n\n|$)/g, '').trim();
+                        if (part.text) {
+                            let cleaned = part.text;
+                            // Strip TODO LIST sections
+                            cleaned = cleaned.replace(/\[TODO LIST\][\s\S]*?(?=\n\n|$)/g, '');
+                            // Strip CURRENT HTML sections
+                            cleaned = cleaned.replace(/\[CURRENT HTML - ALWAYS UP TO DATE\][\s\S]*?\[END CURRENT HTML\]/g, '');
+                            // Strip INITIAL HTML sections (from intermediate messages if any)
+                            cleaned = cleaned.replace(/\[INITIAL HTML - STARTING POINT\][\s\S]*?\[END INITIAL HTML\]/g, '');
+                            // Strip Context Reminder notes
+                            cleaned = cleaned.replace(/\[CONTEXT REMINDER\][\s\S]*?\[END CONTEXT REMINDER\]/g, '');
+                            cleaned = cleaned.trim();
                             return { ...part, text: cleaned || 'OK' };
                         }
                         return part;
@@ -200,7 +208,7 @@ export default function App() {
         }
     };
 
-    const manageVerifierHistory = (history: any[], newCode: string, newScreenshot: string | null) => {
+    const manageVerifierHistory = (history: any[], newCode: string, newScreenshot: string | null, newRecording: string | null) => {
         const newHistory = [...history];
 
         newHistory.forEach(part => {
@@ -225,6 +233,10 @@ export default function App() {
         } else {
             newTurnParts.push({ text: "Screenshot failed to capture (possible runtime error)." });
         }
+        if (newRecording) {
+            newTurnParts.push({ text: "Scene Recording (orbit view - watch for lighting, materials, and geometry from all angles):" });
+            newTurnParts.push({ inlineData: { mimeType: 'video/webm', data: newRecording } });
+        }
 
         newHistory.push({ role: 'user', parts: newTurnParts });
         return newHistory;
@@ -243,9 +255,9 @@ export default function App() {
                 role: 'user',
                 parts: [
                     { text: PROMPTS.EDITOR_SYSTEM },
-                    { text: `[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]` },
                     { text: "Original Reference Image:" },
-                    { inlineData: { mimeType: 'image/png', data: originalImg } }
+                    { inlineData: { mimeType: 'image/png', data: originalImg } },
+                    { text: `[INITIAL HTML - STARTING POINT]\n${formatCodeWithLineNumbers(startCode)}\n[END INITIAL HTML]\n\nThis is the INITIAL code you are starting with. The CURRENT/LATEST HTML will appear at the bottom of the conversation as you make edits.` }
                 ]
             }
         ];
@@ -266,7 +278,24 @@ export default function App() {
 
             if (viewMode !== 'preview') setViewMode('preview');
             await new Promise(r => setTimeout(r, 2000));
+
+            // Capture screenshot and recording for supervisor review
             const screenshot = await previewRef.current?.takeScreenshot();
+            addLog(AgentType.SYSTEM, "Capturing scene recording...", 'info');
+            const recording = await previewRef.current?.recordScene();
+
+            // Add recording to artifacts for UI
+            if (recording) {
+                const recId = `rec-supervisor-${iteration}-${Date.now()}`;
+                setArtifacts(prev => [{
+                    id: recId,
+                    type: 'video',
+                    url: recording,
+                    mimeType: 'video/webm',
+                    description: `Cycle ${iteration} Recording`,
+                    agent: AgentType.VERIFIER
+                }, ...prev]);
+            }
 
             setStatus(WorkflowStatus.CRITIQUING);
 
@@ -278,7 +307,7 @@ export default function App() {
             } else {
                 addLog(AgentType.VERIFIER, "Reviewing scene against reference...", 'info');
 
-                verifierHistory = manageVerifierHistory(verifierHistory, loopCode, screenshot);
+                verifierHistory = manageVerifierHistory(verifierHistory, loopCode, screenshot, recording);
 
                 critique = await runGapFinder(verifierHistory);
 
@@ -293,7 +322,7 @@ export default function App() {
 
             editorHistory.push({
                 role: 'user',
-                parts: [{ text: `SUPERVISOR DIRECTIVES (Iteration ${iteration}):\n${critique}\n\nStart by creating a todo_list.` }]
+                parts: [{ text: `SUPERVISOR DIRECTIVES (Iteration ${iteration}):\n${critique}\n\nStart by creating a todo_list.\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]\n\n${buildTodoContextString(editorTodoRef.current)}` }]
             });
 
             setStatus(WorkflowStatus.EDITING);
@@ -304,22 +333,17 @@ export default function App() {
             while (editorActive && editorSteps < 20) {
                 editorSteps++;
 
-                // Always update the HTML context at the top with current code
-                editorHistory[0].parts[1] = {
-                    text: `[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]`
-                };
-
                 const lastMsg = editorHistory[editorHistory.length - 1];
                 if (lastMsg.role === 'model') {
-                    // Remind agent of context and current todo state
+                    // Inject current HTML + todo list + reminder at the bottom of context
                     editorHistory.push({
                         role: 'user',
-                        parts: [{ text: `Continue.\n\n${buildTodoContextString(editorTodoRef.current)}\n\nJust a reminder:\n\nThe current updated HTML (the one that's rendered rn) is always visible at the top. Prefer concise large multi-operation edits. You cannot verify until all todos are done.` }]
+                        parts: [{ text: `Continue.\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]\n\n${buildTodoContextString(editorTodoRef.current)}\n\n[CONTEXT REMINDER]\nThe current updated HTML above is the latest version rendered. Yes, this is the latest version of the file with your previous tool calls edits applied. Use read_file tool only if truly necessary, since the above file is literally the current latest version with your edits applied. Prefer concise large multi-operation edits. You cannot verify until all todos are done.\n[END CONTEXT REMINDER]` }]
                     });
                 }
 
-                // Strip old todo lists to keep context clean - only latest todo visible
-                editorHistory = stripOldTodoLists(editorHistory);
+                // Strip old context sections to keep history clean - only latest HTML/todo/reminder visible
+                editorHistory = stripOldContextSections(editorHistory);
 
                 // Use streaming for real-time thought updates
                 let modelText = "";
@@ -414,20 +438,36 @@ export default function App() {
                             latestRuntimeErrorRef.current = null;
                         } else {
                             const shot = await previewRef.current?.takeScreenshot();
+                            const recording = await previewRef.current?.recordScene();
+
                             if (shot) {
+                                // Add screenshot artifact
                                 const artId = `shot-${Date.now()}`;
-                                setArtifacts(prev => [{ id: artId, type: 'screenshot' as any, url: shot, description: `Check ${iteration}.${editorSteps}`, agent: AgentType.EDITOR }, ...prev]);
+                                setArtifacts(prev => [{ id: artId, type: 'screenshot', url: shot, mimeType: 'image/png', description: `Check ${iteration}.${editorSteps}`, agent: AgentType.EDITOR }, ...prev]);
+
+                                // Add recording artifact if available
+                                if (recording) {
+                                    const recId = `rec-${Date.now()}`;
+                                    setArtifacts(prev => [{ id: recId, type: 'video', url: recording, mimeType: 'video/webm', description: `Check ${iteration}.${editorSteps} Recording`, agent: AgentType.EDITOR }, ...prev]);
+                                }
 
                                 editorHistory.push({
                                     role: 'function',
-                                    parts: [{ functionResponse: { name: fc.name, response: { result: "Screenshot captured. See next message." } } }]
+                                    parts: [{ functionResponse: { name: fc.name, response: { result: "Screenshot and recording captured. See next message." } } }]
                                 });
+
+                                // Build message parts with both screenshot and recording
+                                const visualParts: any[] = [
+                                    { text: "Here is the visual result of your edit (screenshot + orbit recording). Does it match your expectation?" },
+                                    { inlineData: { mimeType: 'image/png', data: shot } }
+                                ];
+                                if (recording) {
+                                    visualParts.push({ inlineData: { mimeType: 'video/webm', data: recording } });
+                                }
+
                                 editorHistory.push({
                                     role: 'user',
-                                    parts: [
-                                        { text: "Here is the visual result of your edit. Does it match your expectation?" },
-                                        { inlineData: { mimeType: 'image/png', data: shot } }
-                                    ]
+                                    parts: visualParts
                                 });
                                 continue;
                             } else {
@@ -905,13 +945,24 @@ export default function App() {
                             >
                                 <HiX className="w-6 h-6" />
                             </button>
-                            <img
-                                src={`data:image/png;base64,${selectedArtifact.url}`}
-                                alt={selectedArtifact.description}
-                                className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
-                            />
+                            {selectedArtifact.type === 'video' ? (
+                                <video
+                                    src={`data:${selectedArtifact.mimeType || 'video/webm'};base64,${selectedArtifact.url}`}
+                                    controls
+                                    autoPlay
+                                    loop
+                                    className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
+                                />
+                            ) : (
+                                <img
+                                    src={`data:image/png;base64,${selectedArtifact.url}`}
+                                    alt={selectedArtifact.description}
+                                    className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
+                                />
+                            )}
                             <div className="mt-4 text-center">
                                 <span className="bg-surface-2 text-text-secondary px-4 py-2 rounded-full text-sm border border-surface-4">
+                                    {selectedArtifact.type === 'video' && '🎬 '}
                                     {selectedArtifact.description}
                                 </span>
                             </div>

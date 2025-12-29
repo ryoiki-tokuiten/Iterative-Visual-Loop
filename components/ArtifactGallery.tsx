@@ -19,12 +19,24 @@ export const ArtifactGallery: React.FC<ArtifactGalleryProps> = ({ artifacts, onS
           className="relative group flex-shrink-0 rounded-lg overflow-hidden border border-surface-4 cursor-pointer hover:border-accent transition-colors"
           onClick={() => onSelect(art)}
         >
-          <img
-            src={`data:image/png;base64,${art.url}`}
-            alt={art.type}
-            className="w-28 h-20 object-cover transition-transform group-hover:scale-105"
-          />
+          {art.type === 'video' ? (
+            <video
+              src={`data:${art.mimeType || 'video/webm'};base64,${art.url}`}
+              className="w-28 h-20 object-cover"
+              muted
+              loop
+              autoPlay
+              playsInline
+            />
+          ) : (
+            <img
+              src={`data:image/png;base64,${art.url}`}
+              alt={art.type}
+              className="w-28 h-20 object-cover transition-transform group-hover:scale-105"
+            />
+          )}
           <div className="absolute bottom-0 left-0 right-0 bg-surface-0/90 backdrop-blur-sm px-2 py-1 text-[10px] text-text-secondary truncate">
+            {art.type === 'video' && <span className="mr-1">🎬</span>}
             {art.description}
           </div>
         </div>
