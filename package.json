@@ -16,6 +16,7 @@
     "react": "^19.2.1",
     "react-diff-viewer-continued": "^4.0.5",
     "react-dom": "^19.2.1",
+    "react-draggable": "^4.5.0",
     "react-icons": "^5.4.0",
     "react-markdown": "^10.1.0"
   },

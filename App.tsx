@@ -1,6 +1,7 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
+import './app.css';
 import {
     AgentType,
     WorkflowStatus,
@@ -19,6 +20,7 @@ import { applyMultiEdit, readFile, formatCodeWithLineNumbers } from './utils/edi
 import CodePreview, { CodePreviewHandle } from './components/CodePreview';
 import DiffViewer from './components/DiffViewer';
 import { ArtifactGallery } from './components/ArtifactGallery';
+import { HistoryPanel } from './components/HistoryPanel';
 import { PROMPTS } from './constants';
 
 // Icons from react-icons
@@ -36,7 +38,8 @@ import {
     HiCube,
     HiPencil,
     HiSearchCircle,
-    HiTerminal
+    HiTerminal,
+    HiClock
 } from 'react-icons/hi';
 import { VscTools } from 'react-icons/vsc';
 
@@ -48,7 +51,7 @@ const AgentInfo: Record<AgentType, { name: string; Icon: React.ComponentType<{ c
     [AgentType.SYSTEM]: { name: 'System', Icon: HiTerminal, color: 'text-text-muted' },
 };
 
-type SidebarTab = 'activity' | 'plan' | 'history';
+
 type ViewMode = 'preview' | 'code' | 'diff';
 
 export default function App() {
@@ -66,11 +69,13 @@ export default function App() {
     const [apiKeyMissing, setApiKeyMissing] = useState(false);
     const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
     const [selectedArtifact, setSelectedArtifact] = useState<GeneratedArtifact | null>(null);
-    const [activeTab, setActiveTab] = useState<SidebarTab>('activity');
+
+    const [showHistory, setShowHistory] = useState(false);
     const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
 
     const [viewMode, setViewMode] = useState<ViewMode>('preview');
     const [streamingThought, setStreamingThought] = useState<string>('');
+    const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
 
     const previewRef = useRef<CodePreviewHandle>(null);
     const latestRuntimeErrorRef = useRef<string | null>(null);
@@ -87,6 +92,24 @@ export default function App() {
     useEffect(() => {
         editorTodoRef.current = editorTodo;
     }, [editorTodo]);
+
+    // Auto-scroll logic: scroll to bottom unless user scrolled up
+    const handleActivityScroll = useCallback(() => {
+        const el = activityRef.current;
+        if (el) {
+            const { scrollTop, scrollHeight, clientHeight } = el;
+            const isAtBottom = Math.abs(scrollHeight - clientHeight - scrollTop) <= 2;
+            setIsUserScrolledUp(!isAtBottom);
+        }
+    }, []);
+
+    // Auto-scroll to bottom when logs change (unless user scrolled up)
+    useEffect(() => {
+        if (!isUserScrolledUp && activityRef.current) {
+            const el = activityRef.current;
+            el.scrollTop = el.scrollHeight;
+        }
+    }, [logs, streamingThought, isUserScrolledUp]);
 
     // Build todo context string for agent (no emojis)
     const buildTodoContextString = (todos: TodoItem[]): string => {
@@ -184,7 +207,8 @@ export default function App() {
             setEditorTodo([]);
             setCodeHistory([]);
             setViewingVersionId(null);
-            setActiveTab('activity');
+            setViewingVersionId(null);
+            setShowHistory(false);
             latestRuntimeErrorRef.current = null;
             isLoopingRef.current = true;
 
@@ -326,7 +350,6 @@ export default function App() {
             });
 
             setStatus(WorkflowStatus.EDITING);
-            setActiveTab('plan');
             let editorActive = true;
             let editorSteps = 0;
 
@@ -427,6 +450,8 @@ export default function App() {
                             parts.push(`Updated ${args.update_items.length}`);
                         }
                         resultMsg = `OK: ${parts.join(', ')}. ${buildTodoContextString(editorTodoRef.current)}`;
+                        // Add snapshot of todos to log for rendering
+                        args._todoSnapshot = [...editorTodoRef.current];
                     }
                     else if (fc.name === 'take_screenshot') {
                         if (viewMode !== 'preview') setViewMode('preview');
@@ -541,21 +566,61 @@ export default function App() {
 
         if (log.type === 'thought') {
             return (
-                <div className="animate-fade-in">
-                    <div className="flex items-start gap-3 mb-2">
-                        <info.Icon className={`w-5 h-5 ${info.color}`} />
-                        <div className="flex-1">
-                            <div className={`text-sm font-medium ${info.color}`}>{info.name}</div>
-                            <div className="text-xs text-text-muted">Chain of Thought</div>
-                        </div>
+                <div className="message-card agent-message">
+                    <div className="message-header">
+                        <info.Icon className="message-icon\" />
+                        <span className="message-role">{info.name}</span>
+                        <span className="message-time">Chain of Thought</span>
                     </div>
                     <div
-                        className="ml-9 p-4 bg-surface-2 rounded-lg border border-surface-4 max-h-[350px] overflow-y-auto scroll-smooth"
+                        className="thought-card-content"
                         ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
                     >
-                        <div className="prose prose-sm prose-invert max-w-none text-text-secondary [&>p]:mb-3 [&>ul]:mb-3 [&>ol]:mb-3 [&>h1]:text-lg [&>h2]:text-base [&>h3]:text-sm [&>code]:bg-surface-3 [&>code]:px-1 [&>code]:rounded [&>pre]:bg-surface-3 [&>pre]:p-2 [&>pre]:rounded-lg [&>blockquote]:border-l-2 [&>blockquote]:border-accent [&>blockquote]:pl-3 [&>blockquote]:italic">
-                            <ReactMarkdown>{log.details || log.message}</ReactMarkdown>
+                        <ReactMarkdown>{log.details || log.message}</ReactMarkdown>
+                    </div>
+                </div>
+            );
+        }
+
+
+
+        // Special rendering for todo_list tool calls in the stream
+        if (log.type === 'tool_call' && log.message === 'todo_list' && log.metadata?._todoSnapshot) {
+            const todos: TodoItem[] = log.metadata._todoSnapshot;
+            const doneCount = todos.filter(t => t.status === 'done').length;
+            const progress = todos.length > 0 ? Math.round((doneCount / todos.length) * 100) : 0;
+
+            return (
+                <div className="todo-plan-card">
+                    <div className="todo-plan-header">
+                        <VscTools className="tool-icon" />
+                        <span>Updated Plan</span>
+                        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <span style={{ fontSize: '0.75rem' }}>{doneCount}/{todos.length}</span>
+                            <div style={{ width: '4rem', height: '4px', background: 'rgba(var(--accent-yellow-rgb), 0.2)', borderRadius: '9999px', overflow: 'hidden' }}>
+                                <div style={{ height: '100%', background: 'var(--accent-yellow)', width: `${progress}%` }} />
+                            </div>
                         </div>
+                    </div>
+                    <div className="todo-plan-content">
+                        {todos.map((item) => (
+                            <div
+                                key={item.id}
+                                className={`todo-item ${item.status === 'done' ? 'done' : item.status === 'in_progress' ? 'in-progress' : 'pending'}`}
+                            >
+                                <div style={{
+                                    width: '1rem', height: '1rem', borderRadius: '4px', border: '1px solid',
+                                    borderColor: item.status === 'done' ? 'var(--accent-green)' : item.status === 'in_progress' ? 'var(--accent-yellow)' : 'var(--border-color)',
+                                    background: item.status === 'done' ? 'var(--accent-green)' : 'transparent',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+                                }}>
+                                    {item.status === 'done' && <HiCheck style={{ width: '0.7rem', height: '0.7rem', color: 'white' }} />}
+                                </div>
+                                <span style={{ fontSize: '0.8rem', color: item.status === 'done' ? 'var(--text-tertiary-color)' : 'var(--text-secondary-color)', textDecoration: item.status === 'done' ? 'line-through' : 'none' }}>
+                                    {item.text}
+                                </span>
+                            </div>
+                        ))}
                     </div>
                 </div>
             );
@@ -564,27 +629,27 @@ export default function App() {
         if (log.type === 'tool_call') {
             const opCount = log.metadata?.operations?.length;
             return (
-                <div className="animate-fade-in ml-9">
-                    <div className="flex items-center gap-2 p-2 bg-surface-2 rounded-lg border border-surface-4">
-                        <VscTools className="w-4 h-4 text-amber-400" />
-                        <span className="text-sm text-text-secondary font-mono">{log.message}</span>
+                <div className="tool-result">
+                    <div className="tool-result-header">
+                        <VscTools className="tool-icon" />
+                        <span className="tool-name">{log.message}</span>
                         {opCount && (
-                            <span className="text-xs text-text-muted bg-surface-3 px-2 py-0.5 rounded-full">
-                                {opCount} operations
+                            <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', opacity: 0.7 }}>
+                                ({opCount} operations)
                             </span>
                         )}
                         {log.metadata && (
                             <button
                                 onClick={() => toggleLogExpand(log.id)}
-                                className="ml-auto text-xs text-text-muted hover:text-text-secondary"
+                                style={{ marginLeft: 'auto', fontSize: '0.75rem', background: 'none', border: 'none', color: 'var(--text-secondary-color)', cursor: 'pointer' }}
                             >
                                 {isExpanded ? 'Hide' : 'Details'}
                             </button>
                         )}
                     </div>
                     {isExpanded && log.metadata && (
-                        <div className="mt-2 p-3 bg-surface-1 rounded border border-surface-4 font-mono text-xs text-text-muted overflow-x-auto">
-                            <pre>{JSON.stringify(log.metadata, null, 2)}</pre>
+                        <div className="tool-result-content">
+                            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(log.metadata, null, 2)}</pre>
                         </div>
                     )}
                 </div>
@@ -592,25 +657,27 @@ export default function App() {
         }
 
         // Regular message
+        const messageClass = log.type === 'error' ? 'message-card system-error'
+            : log.type === 'success' ? 'message-card system-message'
+                : 'message-card';
+
         return (
-            <div className="animate-fade-in">
-                <div className="flex items-start gap-3">
-                    <info.Icon className="w-5 h-5" />
-                    <div className="flex-1">
-                        <div className={`text-sm font-medium ${info.color}`}>{info.name}</div>
-                        <div className={`text-sm mt-1 ${log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-emerald-400' : 'text-text-secondary'}`}>
-                            {log.message}
-                        </div>
-                        {log.details && (
-                            <button
-                                onClick={() => setSelectedLog(log)}
-                                className="mt-2 text-xs text-accent hover:text-accent-muted"
-                            >
-                                View full output →
-                            </button>
-                        )}
-                    </div>
+            <div className={messageClass}>
+                <div className="message-header">
+                    <info.Icon className="message-icon" />
+                    <span className="message-role">{info.name}</span>
                 </div>
+                <div className="message-content">
+                    {log.message}
+                </div>
+                {log.details && (
+                    <button
+                        onClick={() => setSelectedLog(log)}
+                        style={{ marginTop: '0.5rem', fontSize: '0.75rem', background: 'none', border: 'none', color: 'var(--accent-blue)', cursor: 'pointer' }}
+                    >
+                        View full output →
+                    </button>
+                )}
             </div>
         );
     };
@@ -621,26 +688,26 @@ export default function App() {
         : 0;
 
     return (
-        <div className="flex h-screen bg-surface-0 text-text-primary font-sans overflow-hidden">
+        <div className="app-container">
             {/* Sidebar */}
-            <div className="w-[420px] min-w-[380px] border-r border-surface-4 flex flex-col bg-surface-1">
+            <div className="sidebar-panel">
                 {/* Header */}
-                <div className="p-5 border-b border-surface-4">
-                    <div className="flex items-center gap-3 mb-4">
-                        <div className="w-10 h-10 rounded-xl bg-surface-3 flex items-center justify-center">
-                            <HiSparkles className="w-5 h-5 text-accent" />
+                <div className="sidebar-header">
+                    <div className="sidebar-header-title">
+                        <div className="sidebar-header-icon">
+                            <HiSparkles className="w-5 h-5" />
                         </div>
                         <div>
-                            <h1 className="text-lg font-semibold text-text-primary">Voxel Architect</h1>
-                            <p className="text-xs text-text-muted">AI-Powered Scene Generation</p>
+                            <h1>Iterative Visual Refinements</h1>
+                            <p>AI-Powered Scene Generation</p>
                         </div>
                     </div>
 
                     {/* Image Upload */}
                     {!originalImage ? (
-                        <label className="flex flex-col items-center justify-center w-full h-32 border border-dashed border-surface-4 rounded-xl cursor-pointer hover:bg-surface-2 hover:border-text-muted transition-all group">
-                            <HiPhotograph className="w-8 h-8 text-text-muted group-hover:text-text-secondary mb-2" />
-                            <p className="text-sm text-text-muted group-hover:text-text-secondary">Drop image or click to upload</p>
+                        <label className="upload-area">
+                            <HiPhotograph className="w-8 h-8 upload-area-icon" />
+                            <p className="upload-area-text">Drop image or click to upload</p>
                             <input type="file" className="hidden" accept="image/*" onChange={handleImageUpload} />
                         </label>
                     ) : (
@@ -668,7 +735,7 @@ export default function App() {
                     {originalImage && status === WorkflowStatus.IDLE && (
                         <button
                             onClick={startWorkflow}
-                            className="mt-4 w-full bg-accent hover:bg-accent-muted text-surface-0 font-medium py-3 rounded-xl transition-colors flex items-center justify-center gap-2"
+                            className="btn-primary"
                         >
                             <HiPlay className="w-4 h-4" />
                             Generate Voxel Scene
@@ -676,191 +743,98 @@ export default function App() {
                     )}
 
                     {status !== WorkflowStatus.IDLE && (
-                        <div className="mt-4 flex items-center gap-3 p-3 bg-surface-2 rounded-xl border border-surface-4">
-                            <div className="w-2 h-2 bg-accent rounded-full animate-pulse-subtle" />
-                            <span className="text-sm text-text-secondary">{status}</span>
+                        <div className="status-badge">
+                            <div className="status-dot" />
+                            <span className="status-text">{status}</span>
                         </div>
                     )}
                 </div>
 
-                {/* Tabs */}
-                <div className="flex border-b border-surface-4">
-                    {[
-                        { id: 'activity', label: 'Activity' },
-                        { id: 'plan', label: `Plan${editorTodo.length > 0 ? ` (${editorTodo.filter(t => t.status !== 'done').length})` : ''}` },
-                        { id: 'history', label: 'History' },
-                    ].map((tab) => (
-                        <button
-                            key={tab.id}
-                            onClick={() => setActiveTab(tab.id as SidebarTab)}
-                            className={`flex-1 py-3 text-sm font-medium transition-colors ${activeTab === tab.id
-                                ? 'text-text-primary border-b-2 border-accent'
-                                : 'text-text-muted hover:text-text-secondary'
-                                }`}
-                        >
-                            {tab.label}
-                        </button>
-                    ))}
-                </div>
-
-                {/* Tab Content */}
-                <div className="flex-1 overflow-y-auto">
-                    {activeTab === 'activity' && (
-                        <div ref={activityRef} className="p-4 space-y-4">
-                            {logs.length === 0 && !streamingThought ? (
-                                <div className="text-center py-12 text-text-muted text-sm">
-                                    Activity will appear here once you start generation
-                                </div>
-                            ) : (
-                                <>
-                                    {logs.map((log) => (
-                                        <div key={log.id} className="pb-4 border-b border-surface-3 last:border-0">
-                                            {renderLogEntry(log)}
-                                        </div>
-                                    ))}
-                                    {/* Streaming thought display - at bottom since newest is at bottom */}
-                                    {streamingThought && (
-                                        <div className="pb-4">
-                                            <div className="flex items-start gap-3 mb-2">
-                                                <div className="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center">
-                                                    <div className="w-2 h-2 bg-amber-500 rounded-full animate-ping" />
-                                                </div>
-                                                <div className="flex-1">
-                                                    <div className="text-sm font-medium text-amber-400">Editor</div>
-                                                    <div className="text-xs text-text-muted">Thinking...</div>
-                                                </div>
-                                            </div>
-                                            <div
-                                                className="ml-9 p-4 bg-surface-2 rounded-lg border border-amber-500/30 max-h-[350px] overflow-y-auto scroll-smooth"
-                                                ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
-                                            >
-                                                <div className="prose prose-sm prose-invert max-w-none text-text-secondary">
-                                                    <ReactMarkdown>{streamingThought}</ReactMarkdown>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-                                </>
-                            )}
-                        </div>
-                    )}
-
-                    {activeTab === 'plan' && (
-                        <div className="p-4">
-                            {editorTodo.length > 0 && (
-                                <div className="mb-4">
-                                    <div className="flex items-center justify-between mb-2">
-                                        <span className="text-xs text-text-muted">Progress</span>
-                                        <span className="text-xs text-text-secondary">{todoProgress}%</span>
-                                    </div>
-                                    <div className="h-1.5 bg-surface-3 rounded-full overflow-hidden">
-                                        <div
-                                            className="h-full bg-accent transition-all duration-300 rounded-full"
-                                            style={{ width: `${todoProgress}%` }}
-                                        />
-                                    </div>
-                                </div>
-                            )}
-
-                            <div className="space-y-2">
-                                {editorTodo.length === 0 ? (
-                                    <div className="text-center py-12 text-text-muted text-sm">
-                                        The Editor's task list will appear here
-                                    </div>
-                                ) : (
-                                    editorTodo.map((item, idx) => (
-                                        <div
-                                            key={item.id}
-                                            className={`flex items-start gap-3 p-3 rounded-lg border transition-all ${item.status === 'done'
-                                                ? 'bg-emerald-950/20 border-emerald-900/30'
-                                                : item.status === 'in_progress'
-                                                    ? 'bg-amber-950/20 border-amber-900/30'
-                                                    : 'bg-surface-2 border-surface-4'
-                                                }`}
-                                        >
-                                            <div className={`mt-0.5 w-5 h-5 rounded-md border-2 flex-shrink-0 flex items-center justify-center ${item.status === 'done'
-                                                ? 'bg-emerald-500 border-emerald-500'
-                                                : item.status === 'in_progress'
-                                                    ? 'border-amber-500 animate-pulse'
-                                                    : 'border-surface-4'
-                                                }`}>
-                                                {item.status === 'done' && <HiCheck className="w-3 h-3 text-white" />}
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <div className={`text-sm ${item.status === 'done' ? 'text-text-muted line-through' : 'text-text-secondary'}`}>
-                                                    {item.text}
-                                                </div>
-                                                <div className="text-xs text-text-dim mt-1">#{idx + 1}</div>
-                                            </div>
-                                        </div>
-                                    ))
-                                )}
+                {/* Activity Stream (Single View) - Inside Sidebar */}
+                <div className="flex-1 overflow-y-auto activity-messages-container" ref={activityRef} onScroll={handleActivityScroll}>
+                    <div className="p-4 space-y-3">
+                        {logs.length === 0 && !streamingThought ? (
+                            <div className="text-center py-12 text-text-muted text-sm">
+                                Activity will appear here once you start generation
                             </div>
-                        </div>
-                    )}
-
-                    {activeTab === 'history' && (
-                        <div className="p-4 space-y-2">
-                            {codeHistory.length === 0 ? (
-                                <div className="text-center py-12 text-text-muted text-sm">
-                                    Version history will appear here
-                                </div>
-                            ) : (
-                                codeHistory.map((version, idx) => (
-                                    <button
-                                        key={version.id}
-                                        onClick={() => {
-                                            setViewingVersionId(version.id);
-                                            setViewMode('preview');
-                                        }}
-                                        className={`w-full text-left p-3 rounded-lg border transition-all ${viewingVersionId === version.id
-                                            ? 'border-accent bg-accent-subtle'
-                                            : 'border-surface-4 hover:border-surface-3 bg-surface-2'
-                                            }`}
-                                    >
-                                        <div className="flex items-center justify-between mb-1">
-                                            <span className={`text-sm font-medium ${viewingVersionId === version.id ? 'text-accent' : 'text-text-secondary'}`}>
-                                                v{codeHistory.length - idx}
-                                            </span>
-                                            <span className="text-xs text-text-dim">
-                                                {new Date(version.timestamp).toLocaleTimeString()}
-                                            </span>
+                        ) : (
+                            <>
+                                {logs.map((log) => (
+                                    <div key={log.id} className="pb-4 border-b border-surface-3 last:border-0">
+                                        {renderLogEntry(log)}
+                                    </div>
+                                ))}
+                                {/* Streaming thought display */}
+                                {streamingThought && (
+                                    <div className="thought-card">
+                                        <div className="thought-card-header">
+                                            <div className="pulse-dot" />
+                                            <span className="title">Editor</span>
+                                            <span className="subtitle">Thinking...</span>
                                         </div>
-                                        <div className="text-xs text-text-muted truncate">{version.description}</div>
-                                    </button>
-                                ))
-                            )}
-                        </div>
-                    )}
+                                        <div
+                                            className="thought-card-content"
+                                            ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
+                                        >
+                                            <ReactMarkdown>{streamingThought}</ReactMarkdown>
+                                        </div>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
                 </div>
             </div>
 
             {/* Main Content */}
-            <div className="flex-1 flex flex-col relative h-full bg-surface-0">
-                {/* View Mode Controls */}
-                <div className="absolute top-4 right-4 z-20 flex bg-surface-2 rounded-lg border border-surface-4 p-1 gap-1">
-                    {[
-                        { mode: 'preview', icon: HiEye, label: 'Preview' },
-                        { mode: 'code', icon: HiCode, label: 'Code' },
-                        { mode: 'diff', icon: HiSwitchHorizontal, label: 'Diff' },
-                    ].map(({ mode, icon: Icon, label }) => (
-                        <button
-                            key={mode}
-                            onClick={() => setViewMode(mode as ViewMode)}
-                            className={`p-2 rounded-md flex items-center gap-2 text-sm transition-colors ${viewMode === mode
-                                ? 'bg-surface-3 text-text-primary'
-                                : 'text-text-muted hover:text-text-secondary'
-                                }`}
-                            title={label}
-                        >
-                            <Icon className="w-4 h-4" />
-                        </button>
-                    ))}
+            <div className="main-panel">
+
+                {/* History Button (Top Right) */}
+                <div className="main-panel-controls">
+                    <button
+                        onClick={() => setShowHistory(true)}
+                        className="btn-control"
+                    >
+                        <HiClock className="w-4 h-4" />
+                        History
+                    </button>
+
+                    <div className="btn-group">
+                        {[
+                            { mode: 'preview', icon: HiEye, label: 'Preview' },
+                            { mode: 'code', icon: HiCode, label: 'Code' },
+                            { mode: 'diff', icon: HiSwitchHorizontal, label: 'Diff' },
+                        ].map(({ mode, icon: Icon, label }) => (
+                            <button
+                                key={mode}
+                                onClick={() => setViewMode(mode as ViewMode)}
+                                className={`btn-control ${viewMode === mode ? 'active' : ''}`}
+                                title={label}
+                            >
+                                <Icon className="w-4 h-4" />
+                            </button>
+                        ))}
+                    </div>
                 </div>
 
+                {/* History Floating Panel */}
+                {
+                    showHistory && (
+                        <HistoryPanel
+                            history={codeHistory}
+                            currentVersionId={viewingVersionId}
+                            onSelect={(id) => {
+                                setViewingVersionId(id);
+                                setViewMode('preview');
+                            }}
+                            onClose={() => setShowHistory(false)}
+                        />
+                    )
+                }
+
                 {/* Viewport */}
-                <div className="flex-1 p-4 flex flex-col gap-4 min-h-0">
-                    <div className="flex-1 relative rounded-xl overflow-hidden border border-surface-4 bg-surface-1 min-h-0">
+                <div className="viewport">
+                    <div className="viewport-main">
                         {currentCode ? (
                             <>
                                 <div className={`w-full h-full ${viewMode === 'preview' ? 'block' : 'hidden'}`}>
@@ -910,65 +884,69 @@ export default function App() {
                 </div>
 
                 {/* Modals */}
-                {selectedLog && (() => {
-                    const SelectedIcon = AgentInfo[selectedLog.agent].Icon;
-                    return (
-                        <div className="absolute inset-0 z-50 flex items-center justify-center bg-surface-0/90 backdrop-blur-sm p-8">
-                            <div className="w-full max-w-4xl h-[80vh] bg-surface-1 border border-surface-4 rounded-xl flex flex-col shadow-2xl">
-                                <div className="flex items-center justify-between p-4 border-b border-surface-4">
-                                    <div className="flex items-center gap-3">
-                                        <SelectedIcon className="w-5 h-5" />
-                                        <span className={`font-medium ${AgentInfo[selectedLog.agent].color}`}>
-                                            {AgentInfo[selectedLog.agent].name}
-                                        </span>
+                {
+                    selectedLog && (() => {
+                        const SelectedIcon = AgentInfo[selectedLog.agent].Icon;
+                        return (
+                            <div className="absolute inset-0 z-50 flex items-center justify-center bg-surface-0/90 backdrop-blur-sm p-8">
+                                <div className="w-full max-w-4xl h-[80vh] bg-surface-1 border border-surface-4 rounded-xl flex flex-col shadow-2xl">
+                                    <div className="flex items-center justify-between p-4 border-b border-surface-4">
+                                        <div className="flex items-center gap-3">
+                                            <SelectedIcon className="w-5 h-5" />
+                                            <span className={`font-medium ${AgentInfo[selectedLog.agent].color}`}>
+                                                {AgentInfo[selectedLog.agent].name}
+                                            </span>
+                                        </div>
+                                        <button onClick={() => setSelectedLog(null)} className="p-2 text-text-muted hover:text-text-primary rounded-lg hover:bg-surface-3">
+                                            <HiX className="w-5 h-5" />
+                                        </button>
                                     </div>
-                                    <button onClick={() => setSelectedLog(null)} className="p-2 text-text-muted hover:text-text-primary rounded-lg hover:bg-surface-3">
-                                        <HiX className="w-5 h-5" />
-                                    </button>
-                                </div>
-                                <div className="flex-1 overflow-auto p-4 bg-surface-0">
-                                    <pre className="text-sm font-mono text-text-secondary whitespace-pre-wrap leading-6">
-                                        {selectedLog.details || selectedLog.message}
-                                    </pre>
+                                    <div className="flex-1 overflow-auto p-4 bg-surface-0">
+                                        <pre className="text-sm font-mono text-text-secondary whitespace-pre-wrap leading-6">
+                                            {selectedLog.details || selectedLog.message}
+                                        </pre>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    );
-                })()}
+                        );
+                    })()
+                }
 
-                {selectedArtifact && (
-                    <div className="absolute inset-0 z-50 flex items-center justify-center bg-surface-0/95 backdrop-blur-md p-8">
-                        <div className="relative max-w-full max-h-full">
-                            <button
-                                onClick={() => setSelectedArtifact(null)}
-                                className="absolute -top-12 right-0 p-2 text-text-muted hover:text-text-primary"
-                            >
-                                <HiX className="w-6 h-6" />
-                            </button>
-                            {selectedArtifact.type === 'video' ? (
-                                <video
-                                    src={`data:${selectedArtifact.mimeType || 'video/webm'};base64,${selectedArtifact.url}`}
-                                    controls
-                                    autoPlay
-                                    loop
-                                    className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
-                                />
-                            ) : (
-                                <img
-                                    src={`data:image/png;base64,${selectedArtifact.url}`}
-                                    alt={selectedArtifact.description}
-                                    className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
-                                />
-                            )}
-                            <div className="mt-4 text-center">
-                                <span className="bg-surface-2 text-text-secondary px-4 py-2 rounded-full text-sm border border-surface-4">
-                                    {selectedArtifact.type === 'video' && '🎬 '}
-                                    {selectedArtifact.description}
-                                </span>
+                {
+                    selectedArtifact && (
+                        <div className="absolute inset-0 z-50 flex items-center justify-center bg-surface-0/95 backdrop-blur-md p-8">
+                            <div className="relative max-w-full max-h-full">
+                                <button
+                                    onClick={() => setSelectedArtifact(null)}
+                                    className="absolute -top-12 right-0 p-2 text-text-muted hover:text-text-primary"
+                                >
+                                    <HiX className="w-6 h-6" />
+                                </button>
+                                {selectedArtifact.type === 'video' ? (
+                                    <video
+                                        src={`data:${selectedArtifact.mimeType || 'video/webm'};base64,${selectedArtifact.url}`}
+                                        controls
+                                        autoPlay
+                                        loop
+                                        className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
+                                    />
+                                ) : (
+                                    <img
+                                        src={`data:image/png;base64,${selectedArtifact.url}`}
+                                        alt={selectedArtifact.description}
+                                        className="max-h-[85vh] max-w-[90vw] rounded-xl border border-surface-4 shadow-2xl"
+                                    />
+                                )}
+                                <div className="mt-4 text-center">
+                                    <span className="bg-surface-2 text-text-secondary px-4 py-2 rounded-full text-sm border border-surface-4">
+                                        {selectedArtifact.type === 'video' && '🎬 '}
+                                        {selectedArtifact.description}
+                                    </span>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                )}
+                    )
+                }
             </div>
         </div>
     );
