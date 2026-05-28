@@ -58,6 +58,7 @@ export default function App() {
     const [status, setStatus] = useState<WorkflowStatus>(WorkflowStatus.IDLE);
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [originalImage, setOriginalImage] = useState<string | null>(null);
+    const [originalImageDims, setOriginalImageDims] = useState<{ width: number; height: number } | null>(null);
     const [artifacts, setArtifacts] = useState<GeneratedArtifact[]>([]);
 
     const [currentCode, setCurrentCode] = useState<string>("");
@@ -110,6 +111,54 @@ export default function App() {
             el.scrollTop = el.scrollHeight;
         }
     }, [logs, streamingThought, isUserScrolledUp]);
+
+    // Helper to get image dimensions from base64 string
+    const getImgDims = (base64: string): Promise<{ width: number; height: number }> => {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+            img.onerror = (e) => reject(e);
+            img.src = `data:image/png;base64,${base64}`;
+        });
+    };
+
+    // Helper to crop a base64 image and return base64 cropped string
+    const cropBase64Image = (base64Str: string, x1?: number, y1?: number, x2?: number, y2?: number): Promise<string> => {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    reject(new Error("Failed to get 2d canvas context"));
+                    return;
+                }
+
+                const width = img.naturalWidth;
+                const height = img.naturalHeight;
+
+                const rx1 = Math.max(0, x1 !== undefined ? x1 : 0);
+                const ry1 = Math.max(0, y1 !== undefined ? y1 : 0);
+                const rx2 = Math.min(width, x2 !== undefined ? x2 : width);
+                const ry2 = Math.min(height, y2 !== undefined ? y2 : height);
+
+                const cropW = rx2 - rx1;
+                const cropH = ry2 - ry1;
+
+                if (cropW <= 0 || cropH <= 0) {
+                    reject(new Error(`Invalid crop dimensions: ${cropW}x${cropH}`));
+                    return;
+                }
+
+                canvas.width = cropW;
+                canvas.height = cropH;
+                ctx.drawImage(img, rx1, ry1, cropW, cropH, 0, 0, cropW, cropH);
+                resolve(canvas.toDataURL('image/png').split(',')[1]);
+            };
+            img.onerror = (e) => reject(e);
+            img.src = `data:image/png;base64,${base64Str}`;
+        });
+    };
 
     // Build todo context string for agent (no emojis)
     const buildTodoContextString = (todos: TodoItem[]): string => {
@@ -274,12 +323,14 @@ export default function App() {
         let iteration = 0;
         const maxIterations = 20;
 
+        const dims = await getImgDims(originalImg);
+
         let editorHistory: any[] = [
             {
                 role: 'user',
                 parts: [
                     { text: PROMPTS.EDITOR_SYSTEM },
-                    { text: "Original Reference Image:" },
+                    { text: `Original Reference Image (Dimensions: ${dims.width}x${dims.height} pixels):` },
                     { inlineData: { mimeType: 'image/png', data: originalImg } },
                     { text: `[INITIAL HTML - STARTING POINT]\n${formatCodeWithLineNumbers(startCode)}\n[END INITIAL HTML]\n\nThis is the INITIAL code you are starting with. The CURRENT/LATEST HTML will appear at the bottom of the conversation as you make edits.` }
                 ]
@@ -453,6 +504,41 @@ export default function App() {
                         // Add snapshot of todos to log for rendering
                         args._todoSnapshot = [...editorTodoRef.current];
                     }
+                    else if (fc.name === 'view_reference_image') {
+                        try {
+                            const dims = await getImgDims(originalImg);
+                            const croppedBase64 = await cropBase64Image(originalImg, args.x1, args.y1, args.x2, args.y2);
+
+                            const rx1 = args.x1 !== undefined ? args.x1 : 0;
+                            const ry1 = args.y1 !== undefined ? args.y1 : 0;
+                            const rx2 = args.x2 !== undefined ? args.x2 : dims.width;
+                            const ry2 = args.y2 !== undefined ? args.y2 : dims.height;
+
+                            resultMsg = `Reference image crop [${rx1}, ${ry1}] to [${rx2}, ${ry2}] retrieved successfully. Reference image size: ${dims.width}x${dims.height}.`;
+
+                            // Save cropped base64 to metadata for rendering in UI log
+                            args._croppedImage = croppedBase64;
+                            args._cropCoords = { x1: rx1, y1: ry1, x2: rx2, y2: ry2, width: dims.width, height: dims.height };
+
+                            // Send the cropped image as inline image back to Gemini
+                            editorHistory.push({
+                                role: 'function',
+                                parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: true } } }]
+                            });
+
+                            editorHistory.push({
+                                role: 'user',
+                                parts: [
+                                    { text: `Here is the requested reference image section [${rx1}, ${ry1}] to [${rx2}, ${ry2}]:` },
+                                    { inlineData: { mimeType: 'image/png', data: croppedBase64 } }
+                                ]
+                            });
+                            continue; // Skip standard function response pushing, we did it manually
+                        } catch (err: any) {
+                            resultMsg = `Failed to crop image: ${err.message}`;
+                            toolFailed = true;
+                        }
+                    }
                     else if (fc.name === 'take_screenshot') {
                         if (viewMode !== 'preview') setViewMode('preview');
                         await new Promise(r => setTimeout(r, 2000));
@@ -621,6 +707,34 @@ export default function App() {
                                 </span>
                             </div>
                         ))}
+                    </div>
+                </div>
+            );
+        }
+
+        // Special rendering for view_reference_image tool calls in the stream
+        if (log.type === 'tool_call' && log.message === 'view_reference_image' && log.metadata?._croppedImage) {
+            const coords = log.metadata._cropCoords;
+            return (
+                <div className="todo-plan-card">
+                    <div className="todo-plan-header">
+                        <VscTools className="tool-icon" />
+                        <span>View Reference Image (Zoom)</span>
+                        <span style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.8 }}>
+                            {coords ? `[${coords.x1}, ${coords.y1}] to [${coords.x2}, ${coords.y2}]` : 'Full Image'}
+                        </span>
+                    </div>
+                    <div className="p-3 bg-surface-1 border border-surface-3 rounded-lg mt-2 flex flex-col items-center">
+                        <img 
+                            src={`data:image/png;base64,${log.metadata._croppedImage}`} 
+                            style={{ maxWidth: '100%', maxHeight: '300px', objectFit: 'contain', borderRadius: '8px' }} 
+                            alt="Cropped Reference Section"
+                        />
+                        {coords && (
+                            <span style={{ fontSize: '0.7rem', color: 'var(--text-tertiary-color)', marginTop: '0.5rem' }}>
+                                Natural size: {coords.width}x{coords.height} | Crop: {coords.x2 - coords.x1}x{coords.y2 - coords.y1} px
+                            </span>
+                        )}
                     </div>
                 </div>
             );

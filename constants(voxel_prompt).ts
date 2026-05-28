@@ -1,5 +1,5 @@
 
-export const MODEL_TEXT = 'gemini-3-flash-preview';
+export const MODEL_TEXT = 'gemma-4-31b-it';
 
 export const PROMPTS = {
     CODE_AGENT: `You are the **Voxel Architect Agent**, a specialized AI that generates high-fidelity 3D voxel scenes using Three.js.

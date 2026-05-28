@@ -8,8 +8,8 @@ import { MODEL_TEXT, PROMPTS } from "../constants";
 // Designed for Gemini free tier: 5 RPM (requests per minute)
 
 const RATE_LIMIT_CONFIG = {
-  maxRequestsPerMinute: 5,
-  minDelayBetweenRequests: 12000, // 12 seconds between requests (5 RPM = 1 request per 12 seconds)
+  maxRequestsPerMinute: 50,
+  minDelayBetweenRequests: 120,
   maxRetries: 5,
   baseBackoffMs: 15000, // Start with 15 second backoff
   maxBackoffMs: 120000, // Max 2 minute backoff
@@ -173,7 +173,7 @@ export async function runCodeAgent(
       model: MODEL_TEXT,
       contents: { parts },
       config: {
-        thinkingConfig: { thinkingBudget: 16384 }
+        thinkingLevel: "high"
       }
     });
 
@@ -283,6 +283,19 @@ const editorTools: FunctionDeclaration[] = [
     }
   },
   {
+    name: 'view_reference_image',
+    description: 'Inspect the reference image. Can request a cropped/zoomed section of the image using bounding coordinates.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        x1: { type: Type.INTEGER, description: 'The starting X coordinate of the crop box (left)' },
+        y1: { type: Type.INTEGER, description: 'The starting Y coordinate of the crop box (top)' },
+        x2: { type: Type.INTEGER, description: 'The ending X coordinate of the crop box (right)' },
+        y2: { type: Type.INTEGER, description: 'The ending Y coordinate of the crop box (bottom)' }
+      }
+    }
+  },
+  {
     name: 'exit',
     description: 'Exit the editing loop. Only use this if verify_changes returned STATUS: DEPLOYABLE.',
     parameters: {
@@ -303,7 +316,7 @@ export async function runEditorStepRaw(
       config: {
         tools: [{ functionDeclarations: editorTools }],
         thinkingConfig: {
-          thinkingBudget: 62000,
+          thinkingLevel: "high",
           includeThoughts: true  // Include thought summaries in response
         }
       }
@@ -327,7 +340,7 @@ export async function* runEditorStepStreaming(
     config: {
       tools: [{ functionDeclarations: editorTools }],
       thinkingConfig: {
-        thinkingBudget: 62000,
+        thinkingLevel: "high",
         includeThoughts: true
       }
     }
