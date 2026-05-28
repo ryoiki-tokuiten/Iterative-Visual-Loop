@@ -174,39 +174,12 @@ export default function App() {
         return `[TODO LIST] ${done}/${todos.length} complete\n${lines.join('\n')}${pending > 0 ? `\n>> ${pending} pending - complete before verify_changes` : '\n>> All done - ready to verify'}`;
     };
 
-    // Strip old context sections from history, keeping index 0 (initial) and last message (latest)
-    const stripOldContextSections = (history: any[]): any[] => {
-        return history.map((msg, idx) => {
-            // Keep first message (initial HTML) and last message (latest HTML) as-is
-            if (idx === 0 || idx === history.length - 1) return msg;
-            if (msg.parts) {
-                return {
-                    ...msg,
-                    parts: msg.parts.map((part: any) => {
-                        if (part.text) {
-                            let cleaned = part.text;
-                            // Strip TODO LIST sections
-                            cleaned = cleaned.replace(/\[TODO LIST\][\s\S]*?(?=\n\n|$)/g, '');
-                            // Strip CURRENT HTML sections
-                            cleaned = cleaned.replace(/\[CURRENT HTML - ALWAYS UP TO DATE\][\s\S]*?\[END CURRENT HTML\]/g, '');
-                            // Strip INITIAL HTML sections (from intermediate messages if any)
-                            cleaned = cleaned.replace(/\[INITIAL HTML - STARTING POINT\][\s\S]*?\[END INITIAL HTML\]/g, '');
-                            // Strip Context Reminder notes
-                            cleaned = cleaned.replace(/\[CONTEXT REMINDER\][\s\S]*?\[END CONTEXT REMINDER\]/g, '');
-                            cleaned = cleaned.trim();
-                            return { ...part, text: cleaned || 'OK' };
-                        }
-                        return part;
-                    })
-                };
-            }
-            return msg;
-        });
-    };
+
 
     const addLog = useCallback((agent: AgentType, message: string, type: LogEntry['type'] = 'info', details?: string, metadata?: any) => {
+        const id = Math.random().toString(36).substr(2, 9);
         setLogs(prev => [...prev, {
-            id: Math.random().toString(36).substr(2, 9),
+            id,
             timestamp: Date.now(),
             agent,
             message,
@@ -214,6 +187,22 @@ export default function App() {
             details,
             metadata
         }]);
+        return id;
+    }, []);
+
+    const updateLogMetadata = useCallback((id: string, updates: any) => {
+        setLogs(prev => prev.map(log => {
+            if (log.id === id) {
+                return {
+                    ...log,
+                    metadata: {
+                        ...log.metadata,
+                        ...updates
+                    }
+                };
+            }
+            return log;
+        }));
     }, []);
 
     const handleRuntimeError = useCallback((msg: string) => {
@@ -232,6 +221,8 @@ export default function App() {
         setCodeHistory(prev => [newVersion, ...prev]);
         setCurrentCode(code);
         setViewingVersionId(newVersion.id);
+        // Clear previous runtime errors since a new version is loaded
+        latestRuntimeErrorRef.current = null;
     };
 
     const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -315,6 +306,50 @@ export default function App() {
         return newHistory;
     };
 
+    const prepareHistoryForNextStep = (history: any[], currentCode: string) => {
+        // 1. Strip all existing [CURRENT HTML] blocks from intermediate messages in the history (index > 0)
+        for (let i = 1; i < history.length; i++) {
+            const msg = history[i];
+            if (msg.parts && Array.isArray(msg.parts)) {
+                msg.parts.forEach((part: any) => {
+                    if (part.text && part.text.includes('[CURRENT HTML - ALWAYS UP TO DATE]')) {
+                        part.text = part.text.replace(
+                            /\[CURRENT HTML - ALWAYS UP TO DATE\][\s\S]*?\[END CURRENT HTML\]/g,
+                            '[CURRENT HTML - (Outdated version stripped to save context space)]'
+                        );
+                    }
+                });
+            }
+        }
+
+        // 2. Append the latest HTML block to the last user message or push a new one
+        const htmlBlock = `\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(currentCode)}\n[END CURRENT HTML]\n\n[CONTEXT REMINDER]\nThe HTML code block above is the absolute latest up-to-date version of the file with all successful edits applied.`;
+
+        const lastMsg = history[history.length - 1];
+        if (lastMsg && lastMsg.role === 'user') {
+            // Find the first text part in this user message and append the HTML to it
+            let appended = false;
+            if (lastMsg.parts && Array.isArray(lastMsg.parts)) {
+                for (const part of lastMsg.parts) {
+                    if (part.text) {
+                        part.text += htmlBlock;
+                        appended = true;
+                        break;
+                    }
+                }
+                if (!appended) {
+                    lastMsg.parts.push({ text: htmlBlock });
+                }
+            }
+        } else {
+            // If the last message is not 'user' (e.g. it is 'model' or 'function'), push a new user message containing the HTML block
+            history.push({
+                role: 'user',
+                parts: [{ text: `[SYSTEM CONTEXT]\n${htmlBlock}` }]
+            });
+        }
+    };
+
     const runRefinementLoop = async (
         originalImg: string,
         startCode: string
@@ -324,6 +359,17 @@ export default function App() {
         const maxIterations = 20;
 
         const dims = await getImgDims(originalImg);
+
+        // Upload initial reference image to sandbox
+        try {
+            await fetch('/api/save-media', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: 'reference_image.png', base64: originalImg })
+            });
+        } catch (e) {
+            console.error("Failed to save reference image to sandbox:", e);
+        }
 
         let editorHistory: any[] = [
             {
@@ -348,7 +394,8 @@ export default function App() {
         ];
 
         while (isLoopingRef.current && iteration < maxIterations) {
-            iteration++;
+            try {
+                iteration++;
             addLog(AgentType.SYSTEM, `Refinement cycle ${iteration}`, 'info');
 
             if (viewMode !== 'preview') setViewMode('preview');
@@ -409,15 +456,14 @@ export default function App() {
 
                 const lastMsg = editorHistory[editorHistory.length - 1];
                 if (lastMsg.role === 'model') {
-                    // Inject current HTML + todo list + reminder at the bottom of context
                     editorHistory.push({
                         role: 'user',
-                        parts: [{ text: `Continue.\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]\n\n${buildTodoContextString(editorTodoRef.current)}\n\n[CONTEXT REMINDER]\nThe current updated HTML above is the latest version rendered. Yes, this is the latest version of the file with your previous tool calls edits applied. Use read_file tool only if truly necessary, since the above file is literally the current latest version with your edits applied. Prefer concise large multi-operation edits. You cannot verify until all todos are done.\n[END CONTEXT REMINDER]` }]
+                        parts: [{ text: `Continue.` }]
                     });
                 }
 
-                // Strip old context sections to keep history clean - only latest HTML/todo/reminder visible
-                editorHistory = stripOldContextSections(editorHistory);
+                // Prepare history: strip old intermediate HTML copies and inject the latest HTML version in the latest message
+                prepareHistoryForNextStep(editorHistory, loopCode);
 
                 // Use streaming for real-time thought updates
                 let modelText = "";
@@ -456,7 +502,7 @@ export default function App() {
                 if (functionCall) {
                     const fc = functionCall;
                     const args = fc.args;
-                    addLog(AgentType.EDITOR, `${fc.name}`, 'tool_call', undefined, args);
+                    const logId = addLog(AgentType.EDITOR, `${fc.name}`, 'tool_call', undefined, args);
 
                     let resultMsg = "Tool executed.";
                     let toolFailed = false;
@@ -504,38 +550,71 @@ export default function App() {
                         // Add snapshot of todos to log for rendering
                         args._todoSnapshot = [...editorTodoRef.current];
                     }
-                    else if (fc.name === 'view_reference_image') {
+                    else if (fc.name === 'run_python_script') {
                         try {
-                            const dims = await getImgDims(originalImg);
-                            const croppedBase64 = await cropBase64Image(originalImg, args.x1, args.y1, args.x2, args.y2);
+                            const res = await fetch('/api/run-python', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ script: args.script })
+                            });
 
-                            const rx1 = args.x1 !== undefined ? args.x1 : 0;
-                            const ry1 = args.y1 !== undefined ? args.y1 : 0;
-                            const rx2 = args.x2 !== undefined ? args.x2 : dims.width;
-                            const ry2 = args.y2 !== undefined ? args.y2 : dims.height;
+                            if (!res.ok) {
+                                throw new Error(`HTTP error! status: ${res.status}`);
+                            }
 
-                            resultMsg = `Reference image crop [${rx1}, ${ry1}] to [${rx2}, ${ry2}] retrieved successfully. Reference image size: ${dims.width}x${dims.height}.`;
+                            const runResult = await res.json();
 
-                            // Save cropped base64 to metadata for rendering in UI log
-                            args._croppedImage = croppedBase64;
-                            args._cropCoords = { x1: rx1, y1: ry1, x2: rx2, y2: ry2, width: dims.width, height: dims.height };
+                            // Construct tool response text
+                            let textResult = `Python script executed ${runResult.success ? 'successfully' : 'with errors'}.\n`;
+                            textResult += `Exit code: ${runResult.exitCode}\n\n`;
+                            if (runResult.stdout) {
+                                textResult += `[STDOUT]\n${runResult.stdout}\n[END STDOUT]\n\n`;
+                            }
+                            if (runResult.stderr) {
+                                textResult += `[STDERR]\n${runResult.stderr}\n[END STDERR]\n\n`;
+                            }
+                            if (runResult.files && runResult.files.length > 0) {
+                                textResult += `Generated output files: ${runResult.files.map((f: any) => f.filename).join(', ')}`;
+                            } else {
+                                textResult += `No output files generated.`;
+                            }
 
-                            // Send the cropped image as inline image back to Gemini
+                            resultMsg = textResult;
+                            args.script = args.script; // Store script in args for rendering in UI log
+                            args._runResult = runResult; // Store runResult in args for rendering in UI log
+
+                            // Push the function response
                             editorHistory.push({
                                 role: 'function',
-                                parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: true } } }]
+                                parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: runResult.success } } }]
+                            });
+                            updateLogMetadata(logId, {
+                                _resultMsg: resultMsg,
+                                _success: runResult.success,
+                                _runResult: runResult
                             });
 
-                            editorHistory.push({
-                                role: 'user',
-                                parts: [
-                                    { text: `Here is the requested reference image section [${rx1}, ${ry1}] to [${rx2}, ${ry2}]:` },
-                                    { inlineData: { mimeType: 'image/png', data: croppedBase64 } }
-                                ]
-                            });
+                            // If there are output files (images/videos), attach them to editorHistory as user role parts
+                            if (runResult.files && runResult.files.length > 0) {
+                                const fileParts: any[] = [
+                                    { text: `Here are the output files generated by the python script:` }
+                                ];
+                                for (const file of runResult.files) {
+                                    fileParts.push({
+                                        inlineData: {
+                                            mimeType: file.mimeType,
+                                            data: file.base64
+                                        }
+                                    });
+                                }
+                                editorHistory.push({
+                                    role: 'user',
+                                    parts: fileParts
+                                });
+                            }
                             continue; // Skip standard function response pushing, we did it manually
                         } catch (err: any) {
-                            resultMsg = `Failed to crop image: ${err.message}`;
+                            resultMsg = `Failed to execute python script: ${err.message}`;
                             toolFailed = true;
                         }
                     }
@@ -552,6 +631,40 @@ export default function App() {
                             const recording = await previewRef.current?.recordScene();
 
                             if (shot) {
+                                // Upload screenshot to sandbox
+                                try {
+                                    await fetch('/api/save-media', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ filename: `screenshot_latest.png`, base64: shot })
+                                    });
+                                    await fetch('/api/save-media', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ filename: `screenshot_iter_${iteration}.png`, base64: shot })
+                                    });
+                                } catch (e) {
+                                    console.error("Failed to save screenshot to sandbox:", e);
+                                }
+
+                                // Upload recording to sandbox if available
+                                if (recording) {
+                                    try {
+                                        await fetch('/api/save-media', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ filename: `recording_latest.webm`, base64: recording })
+                                        });
+                                        await fetch('/api/save-media', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ filename: `recording_iter_${iteration}.webm`, base64: recording })
+                                        });
+                                    } catch (e) {
+                                        console.error("Failed to save recording to sandbox:", e);
+                                    }
+                                }
+
                                 // Add screenshot artifact
                                 const artId = `shot-${Date.now()}`;
                                 setArtifacts(prev => [{ id: artId, type: 'screenshot', url: shot, mimeType: 'image/png', description: `Check ${iteration}.${editorSteps}`, agent: AgentType.EDITOR }, ...prev]);
@@ -565,6 +678,12 @@ export default function App() {
                                 editorHistory.push({
                                     role: 'function',
                                     parts: [{ functionResponse: { name: fc.name, response: { result: "Screenshot and recording captured. See next message." } } }]
+                                });
+                                updateLogMetadata(logId, {
+                                    _resultMsg: "Screenshot and recording captured.",
+                                    _success: true,
+                                    _screenshot: shot,
+                                    _recording: recording
                                 });
 
                                 // Build message parts with both screenshot and recording
@@ -609,7 +728,17 @@ export default function App() {
                         role: 'function',
                         parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: !toolFailed } } }]
                     });
+                    updateLogMetadata(logId, {
+                        _resultMsg: resultMsg,
+                        _success: !toolFailed
+                    });
                 }
+            }
+            } catch (err: any) {
+                console.error("Error in refinement loop iteration:", err);
+                addLog(AgentType.SYSTEM, `Refinement loop error: ${err.message || err}. Retrying in 10s...`, 'error');
+                iteration = Math.max(0, iteration - 1);
+                await new Promise(r => setTimeout(r, 10000));
             }
         }
 
@@ -712,28 +841,67 @@ export default function App() {
             );
         }
 
-        // Special rendering for view_reference_image tool calls in the stream
-        if (log.type === 'tool_call' && log.message === 'view_reference_image' && log.metadata?._croppedImage) {
-            const coords = log.metadata._cropCoords;
+        // Special rendering for run_python_script tool calls in the stream
+        if (log.type === 'tool_call' && log.message === 'run_python_script' && log.metadata?._runResult) {
+            const result = log.metadata._runResult;
             return (
                 <div className="todo-plan-card">
                     <div className="todo-plan-header">
                         <VscTools className="tool-icon" />
-                        <span>View Reference Image (Zoom)</span>
-                        <span style={{ marginLeft: 'auto', fontSize: '0.75rem', opacity: 0.8 }}>
-                            {coords ? `[${coords.x1}, ${coords.y1}] to [${coords.x2}, ${coords.y2}]` : 'Full Image'}
+                        <span>Run Python Script</span>
+                        <span style={{ marginLeft: 'auto', fontSize: '0.75rem', color: result.success ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                            {result.success ? 'Success' : `Failed (Exit: ${result.exitCode})`}
                         </span>
                     </div>
-                    <div className="p-3 bg-surface-1 border border-surface-3 rounded-lg mt-2 flex flex-col items-center">
-                        <img 
-                            src={`data:image/png;base64,${log.metadata._croppedImage}`} 
-                            style={{ maxWidth: '100%', maxHeight: '300px', objectFit: 'contain', borderRadius: '8px' }} 
-                            alt="Cropped Reference Section"
-                        />
-                        {coords && (
-                            <span style={{ fontSize: '0.7rem', color: 'var(--text-tertiary-color)', marginTop: '0.5rem' }}>
-                                Natural size: {coords.width}x{coords.height} | Crop: {coords.x2 - coords.x1}x{coords.y2 - coords.y1} px
-                            </span>
+                    <div className="p-3 bg-surface-1 border border-surface-3 rounded-lg mt-2 flex flex-col gap-2">
+                        {/* Script code preview */}
+                        <details className="w-full text-xs bg-black text-green-400 p-2 rounded-lg font-mono">
+                            <summary className="cursor-pointer select-none font-bold text-gray-400">View Python Code</summary>
+                            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap">{log.metadata.script}</pre>
+                        </details>
+
+                        {/* stdout/stderr */}
+                        {result.stdout && (
+                            <div className="w-full text-xs bg-surface-2 p-2 rounded-lg font-mono">
+                                <div className="text-gray-400 font-bold mb-1">STDOUT:</div>
+                                <pre className="overflow-x-auto whitespace-pre-wrap text-text-primary-color">{result.stdout}</pre>
+                            </div>
+                        )}
+                        {result.stderr && (
+                            <div className="w-full text-xs bg-surface-2 p-2 rounded-lg font-mono border border-red-500/20">
+                                <div className="text-red-400 font-bold mb-1">STDERR:</div>
+                                <pre className="overflow-x-auto whitespace-pre-wrap text-red-300">{result.stderr}</pre>
+                            </div>
+                        )}
+
+                        {/* Output Files Render */}
+                        {result.files && result.files.length > 0 && (
+                            <div className="mt-2 flex flex-col gap-3 w-full">
+                                <div className="text-xs font-bold text-gray-400">Generated Output Files:</div>
+                                {result.files.map((file: any, idx: number) => {
+                                    const isImage = file.mimeType.startsWith('image/');
+                                    const isVideo = file.mimeType.startsWith('video/');
+                                    return (
+                                        <div key={idx} className="flex flex-col items-center p-2 bg-surface-2 rounded-lg border border-surface-3 w-full">
+                                            <div className="text-xs text-gray-400 mb-1 font-mono">{file.filename} ({file.mimeType})</div>
+                                            {isImage && (
+                                                <img 
+                                                    src={`data:${file.mimeType};base64,${file.base64}`} 
+                                                    style={{ maxWidth: '100%', maxHeight: '300px', objectFit: 'contain', borderRadius: '8px' }} 
+                                                    alt={file.filename}
+                                                />
+                                            )}
+                                            {isVideo && (
+                                                <video 
+                                                    src={`data:${file.mimeType};base64,${file.base64}`} 
+                                                    controls
+                                                    style={{ maxWidth: '100%', maxHeight: '300px', borderRadius: '8px' }} 
+                                                />
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
                         )}
                     </div>
                 </div>
@@ -742,28 +910,75 @@ export default function App() {
 
         if (log.type === 'tool_call') {
             const opCount = log.metadata?.operations?.length;
+            const isCompleted = log.metadata?._resultMsg !== undefined;
+            const isSuccess = log.metadata?._success;
             return (
-                <div className="tool-result">
-                    <div className="tool-result-header">
+                <div className="todo-plan-card" style={{ borderColor: 'rgba(var(--accent-blue-rgb), 0.3)', background: 'rgba(var(--accent-blue-rgb), 0.02)' }}>
+                    <div className="todo-plan-header" style={{ color: 'var(--accent-blue)', background: 'rgba(var(--accent-blue-rgb), 0.08)', borderBottomColor: 'rgba(var(--accent-blue-rgb), 0.15)' }}>
                         <VscTools className="tool-icon" />
-                        <span className="tool-name">{log.message}</span>
+                        <span className="tool-name font-mono font-bold">{log.message}</span>
                         {opCount && (
                             <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', opacity: 0.7 }}>
                                 ({opCount} operations)
                             </span>
                         )}
+                        {isCompleted && (
+                            <span style={{ marginLeft: 'auto', fontSize: '0.75rem', color: isSuccess ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: 'bold' }}>
+                                {isSuccess ? 'Success' : 'Failed'}
+                            </span>
+                        )}
                         {log.metadata && (
                             <button
                                 onClick={() => toggleLogExpand(log.id)}
-                                style={{ marginLeft: 'auto', fontSize: '0.75rem', background: 'none', border: 'none', color: 'var(--text-secondary-color)', cursor: 'pointer' }}
+                                style={{ marginLeft: isCompleted ? '0.5rem' : 'auto', fontSize: '0.75rem', background: 'none', border: 'none', color: 'var(--text-secondary-color)', cursor: 'pointer' }}
                             >
-                                {isExpanded ? 'Hide' : 'Details'}
+                                {isExpanded ? 'Hide Args' : 'View Args'}
                             </button>
                         )}
                     </div>
+                    
                     {isExpanded && log.metadata && (
-                        <div className="tool-result-content">
-                            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(log.metadata, null, 2)}</pre>
+                        <div className="p-3 bg-surface-1 border border-surface-3 rounded-lg m-2 text-xs font-mono text-text-secondary-color max-h-48 overflow-y-auto">
+                            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+                                {JSON.stringify(
+                                    Object.keys(log.metadata)
+                                        .filter(k => !k.startsWith('_') && k !== 'logId')
+                                        .reduce((obj, key) => ({ ...obj, [key]: log.metadata[key] }), {}),
+                                    null,
+                                    2
+                                )}
+                            </pre>
+                        </div>
+                    )}
+
+                    {isCompleted && log.metadata?._resultMsg && (
+                        <div className="p-3 bg-surface-1/40 border-t border-surface-3 flex flex-col gap-3">
+                            <div className="w-full text-xs bg-surface-2 p-2.5 rounded-lg font-mono border border-surface-3">
+                                <div className="text-gray-400 font-bold mb-1.5 uppercase tracking-wider text-[0.65rem]">System Response Sent to LLM:</div>
+                                <pre className="overflow-x-auto whitespace-pre-wrap text-text-primary-color leading-relaxed">{log.metadata._resultMsg}</pre>
+                            </div>
+                            
+                            {log.metadata._screenshot && (
+                                <div className="flex flex-col items-center p-2 bg-surface-2 rounded-lg border border-surface-3 w-full">
+                                    <div className="text-[0.65rem] text-gray-400 mb-1.5 font-mono uppercase tracking-wider">screenshot_latest.png (Render Viewport)</div>
+                                    <img 
+                                        src={`data:image/png;base64,${log.metadata._screenshot}`} 
+                                        style={{ maxWidth: '100%', maxHeight: '240px', objectFit: 'contain', borderRadius: '6px' }} 
+                                        alt="Tool Output Screenshot"
+                                    />
+                                </div>
+                            )}
+                            
+                            {log.metadata._recording && (
+                                <div className="flex flex-col items-center p-2 bg-surface-2 rounded-lg border border-surface-3 w-full">
+                                    <div className="text-[0.65rem] text-gray-400 mb-1.5 font-mono uppercase tracking-wider">recording_latest.webm (Orbit Video)</div>
+                                    <video 
+                                        src={`data:video/webm;base64,${log.metadata._recording}`} 
+                                        controls
+                                        style={{ maxWidth: '100%', maxHeight: '240px', borderRadius: '6px' }} 
+                                    />
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

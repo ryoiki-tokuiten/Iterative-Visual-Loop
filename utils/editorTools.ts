@@ -1,31 +1,15 @@
 
 export const applySearchAndReplace = (code: string, searchStr: string, replaceStr: string): { newCode: string; success: boolean; msg: string } => {
   if (!code.includes(searchStr)) {
-    return { newCode: code, success: false, msg: `Search string not found: "${searchStr.substring(0, 20)}..."` };
+    return { newCode: code, success: false, msg: `Search string not found. Make sure you are copying the exact text from the file, including whitespace and indentation.` };
+  }
+  // Check for multiple occurrences
+  const count = code.split(searchStr).length - 1;
+  if (count > 1) {
+    return { newCode: code, success: false, msg: `Search string found ${count} times. Provide a longer, more unique search string that matches exactly once.` };
   }
   const newCode = code.replace(searchStr, replaceStr);
-  return { newCode, success: true, msg: 'Replaced text successfully.' };
-};
-
-export const applyDeleteLines = (code: string, startLine: number, endLine: number): { newCode: string; success: boolean; msg: string } => {
-  const lines = code.split('\n');
-  if (startLine < 1 || endLine > lines.length || startLine > endLine) {
-    return { newCode: code, success: false, msg: `Invalid line range: ${startLine}-${endLine}` };
-  }
-  // Adjust for 0-index array, remove lines
-  lines.splice(startLine - 1, endLine - startLine + 1);
-  return { newCode: lines.join('\n'), success: true, msg: `Deleted lines ${startLine} to ${endLine}.` };
-};
-
-export const applyInsert = (code: string, lineNum: number, text: string, position: 'before' | 'after'): { newCode: string; success: boolean; msg: string } => {
-  const lines = code.split('\n');
-  if (lineNum < 1 || lineNum > lines.length + 1) {
-    return { newCode: code, success: false, msg: `Invalid line number: ${lineNum}` };
-  }
-
-  const index = position === 'before' ? lineNum - 1 : lineNum;
-  lines.splice(index, 0, text);
-  return { newCode: lines.join('\n'), success: true, msg: `Inserted text ${position} line ${lineNum}.` };
+  return { newCode, success: true, msg: 'Edit applied.' };
 };
 
 export const readFile = (code: string, start?: number, end?: number): string => {
@@ -48,48 +32,64 @@ export const formatCodeWithLineNumbers = (code: string): string => {
 };
 
 export const applyMultiEdit = (code: string, operations: any[]): { newCode: string; success: boolean; msg: string } => {
+  if (!operations || operations.length === 0) {
+    return { newCode: code, success: false, msg: "No operations provided." };
+  }
+
   let currentCode = code;
-  const logs: string[] = [];
+  const successes: string[] = [];
+  const failures: string[] = [];
 
   for (let i = 0; i < operations.length; i++) {
     const op = operations[i];
-    let res = { newCode: currentCode, success: false, msg: 'Unknown op' };
+    const searchStr = op.search_str || op.old || op.find || '';
+    const replaceStr = op.replace_str || op.new || op.replacement || '';
 
-    try {
-      switch (op.action) {
-        case 'replace':
-          res = applySearchAndReplace(currentCode, op.search_str, op.replace_str);
-          break;
-        case 'remove_text':
-          res = applySearchAndReplace(currentCode, op.search_str, "");
-          break;
-        case 'delete':
-          res = applyDeleteLines(currentCode, op.start_line, op.end_line);
-          break;
-        case 'insert_before':
-          res = applyInsert(currentCode, op.line_number, op.text, 'before');
-          break;
-        case 'insert_after':
-          res = applyInsert(currentCode, op.line_number, op.text, 'after');
-          break;
-        default:
-          res = { newCode: currentCode, success: false, msg: `Invalid action: ${op.action}` };
-      }
-    } catch (e: any) {
-      res = { newCode: currentCode, success: false, msg: `Exception during op: ${e.message}` };
+    if (!searchStr && !replaceStr) {
+      failures.push(`Step ${i + 1}: Both search and replace strings are empty.`);
+      continue;
+    }
+    if (!searchStr) {
+      failures.push(`Step ${i + 1}: No search string provided.`);
+      continue;
     }
 
+    const res = applySearchAndReplace(currentCode, searchStr, replaceStr);
     if (!res.success) {
-      return {
-        newCode: code, // Revert to original if any step fails to maintain integrity
-        success: false,
-        msg: `Batch failed at step ${i + 1} (${op.action}): ${res.msg}`
-      };
+      failures.push(`Step ${i + 1} Failed: ${res.msg}`);
+    } else {
+      currentCode = res.newCode;
+      successes.push(`Step ${i + 1} Succeeded`);
     }
-
-    currentCode = res.newCode;
-    logs.push(res.msg);
   }
 
-  return { newCode: currentCode, success: true, msg: `Batch executed (${operations.length} ops).` };
+  const total = operations.length;
+  const succeededCount = successes.length;
+  const failedCount = failures.length;
+
+  if (succeededCount === 0) {
+    return {
+      newCode: code,
+      success: false,
+      msg: `All ${total} edit(s) failed!\n\nDetails:\n${failures.join('\n')}`
+    };
+  }
+
+  if (failedCount === 0) {
+    return {
+      newCode: currentCode,
+      success: true,
+      msg: `Success: All ${total} edit(s) applied successfully.`
+    };
+  }
+
+  // Partial success
+  return {
+    newCode: currentCode,
+    success: true, // Return true so that the successfully matched edits are committed and run!
+    msg: `PARTIAL SUCCESS: Successfully applied ${succeededCount} out of ${total} edits.\n\n` +
+         `=== SUCCESSFULLY APPLIED ===\n${successes.join('\n')}\n\n` +
+         `=== FAILED (NOT APPLIED) ===\n${failures.join('\n')}\n\n` +
+         `Note: The successfully matched edits have been saved and applied to the active file. Please review the failed steps above and re-apply only those steps using exact matching text.`
+  };
 };

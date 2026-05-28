@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
+import { GoogleGenAI, FunctionDeclaration, Type, ThinkingLevel } from "@google/genai";
 import { MODEL_TEXT, PROMPTS } from "../constants";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +173,9 @@ export async function runCodeAgent(
       model: MODEL_TEXT,
       contents: { parts },
       config: {
-        thinkingLevel: "high"
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.HIGH,
+        }
       }
     });
 
@@ -209,7 +211,7 @@ export async function runGapFinder(
 const editorTools: FunctionDeclaration[] = [
   {
     name: 'multi_edit',
-    description: 'Execute multiple file edits (delete, replace, remove_text, insert) in a single sequential pass.',
+    description: 'Apply one or more search-and-replace edits to the active scene file. Set replace_str to an empty string to delete code.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -218,15 +220,10 @@ const editorTools: FunctionDeclaration[] = [
           items: {
             type: Type.OBJECT,
             properties: {
-              action: { type: Type.STRING, enum: ['replace', 'delete', 'remove_text', 'insert_before', 'insert_after'] },
-              search_str: { type: Type.STRING },
-              replace_str: { type: Type.STRING },
-              start_line: { type: Type.INTEGER },
-              end_line: { type: Type.INTEGER },
-              line_number: { type: Type.INTEGER },
-              text: { type: Type.STRING }
+              search_str: { type: Type.STRING, description: 'The exact string of code in the file to find. This must match exactly once in the file, including whitespace/indentation.' },
+              replace_str: { type: Type.STRING, description: 'The replacement string of code to substitute in. Use an empty string to delete the matched search_str.' }
             },
-            required: ['action']
+            required: ['search_str', 'replace_str']
           }
         }
       },
@@ -235,7 +232,7 @@ const editorTools: FunctionDeclaration[] = [
   },
   {
     name: 'read_file',
-    description: 'Read the full file or a specific range of lines.',
+    description: 'Read a specific range of lines from the current code. Example: { start_line: 100, end_line: 150 }.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -246,7 +243,7 @@ const editorTools: FunctionDeclaration[] = [
   },
   {
     name: 'todo_list',
-    description: 'Manage the to-do list with statuses.',
+    description: 'Manage the checklist. Create it first using add_items: ["Task 1", "Task 2"]. Update task status using update_items: [{ index: 0, status: "done" }]. Clear list using clear: true.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -268,7 +265,7 @@ const editorTools: FunctionDeclaration[] = [
   },
   {
     name: 'take_screenshot',
-    description: 'Capture the current state of the voxel scene. Use this AFTER every edit to verify your work.',
+    description: 'Capture the current scene screenshot and video. Use this after EVERY edit to visually evaluate your changes against the reference.',
     parameters: {
       type: Type.OBJECT,
       properties: {}
@@ -276,23 +273,24 @@ const editorTools: FunctionDeclaration[] = [
   },
   {
     name: 'verify_changes',
-    description: 'Submit work for final review. BLOCKED if todo items are pending.',
+    description: 'Submit the final code to the Supervisor once it is fully complete and all todo items are marked "done".',
     parameters: {
       type: Type.OBJECT,
       properties: {}
     }
   },
   {
-    name: 'view_reference_image',
-    description: 'Inspect the reference image. Can request a cropped/zoomed section of the image using bounding coordinates.',
+    name: 'run_python_script',
+    description: 'Execute a python script in the sandboxed workspace folder to perform image/video processing, comparison, analysis, crops, or custom transformations. Available libraries: cv2 (OpenCV), PIL (Pillow), numpy, scipy, skimage (scikit-image), moviepy, matplotlib, seaborn, plotly, sklearn (scikit-learn), imageio, ffmpeg (ffmpeg-python), sympy, openpyxl, pywt (PyWavelets), albumentations, tifffile, simsimd, stringzilla. Files present: reference_image.png, screenshot_latest.png, screenshot_iter_[N].png, recording_latest.webm, recording_iter_[N].webm. Any output file saved in the current directory matching pattern "output_*.*" (e.g. output_diff.png, output_clip.webm) is automatically returned and attached to your history as a visual multimodal input.',
     parameters: {
       type: Type.OBJECT,
       properties: {
-        x1: { type: Type.INTEGER, description: 'The starting X coordinate of the crop box (left)' },
-        y1: { type: Type.INTEGER, description: 'The starting Y coordinate of the crop box (top)' },
-        x2: { type: Type.INTEGER, description: 'The ending X coordinate of the crop box (right)' },
-        y2: { type: Type.INTEGER, description: 'The ending Y coordinate of the crop box (bottom)' }
-      }
+        script: {
+          type: Type.STRING,
+          description: 'The python script code to execute. Can load reference_image.png, screenshot_latest.png, or recording_latest.webm, use libraries like cv2, numpy, PIL, moviepy, and write output files prefixing with "output_".'
+        }
+      },
+      required: ['script']
     }
   },
   {
@@ -316,7 +314,7 @@ export async function runEditorStepRaw(
       config: {
         tools: [{ functionDeclarations: editorTools }],
         thinkingConfig: {
-          thinkingLevel: "high",
+          thinkingLevel: ThinkingLevel.LOW,
           includeThoughts: true  // Include thought summaries in response
         }
       }
@@ -340,7 +338,7 @@ export async function* runEditorStepStreaming(
     config: {
       tools: [{ functionDeclarations: editorTools }],
       thinkingConfig: {
-        thinkingLevel: "high",
+        thinkingLevel: ThinkingLevel.HIGH,
         includeThoughts: true
       }
     }
