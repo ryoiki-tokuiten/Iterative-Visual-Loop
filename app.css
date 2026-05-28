@@ -8,30 +8,30 @@
     /* Accent colors with RGB variants for rgba() usage */
     --accent-blue: #60a5fa;
     --accent-blue-rgb: 96, 165, 250;
-    --accent-purple: #a78bfa;
-    --accent-purple-rgb: 167, 139, 250;
-    --accent-green: #4ade80;
-    --accent-green-rgb: 74, 222, 128;
+    --accent-purple: #8b5cf6;
+    --accent-purple-rgb: 139, 92, 246;
+    --accent-green: #34d399;
+    --accent-green-rgb: 52, 211, 153;
     --accent-pink: #f472b6;
     --accent-pink-rgb: 244, 114, 182;
-    --accent-yellow: #facc15;
-    --accent-yellow-rgb: 250, 204, 21;
+    --accent-yellow: #fbbf24;
+    --accent-yellow-rgb: 251, 191, 36;
 
     /* Surface colors */
-    --bg-color: #0f0f15;
-    --bg-color-rgb: 15, 15, 21;
-    --card-bg-base: #1a1a24;
-    --card-bg-base-rgb: 26, 26, 36;
+    --bg-color: #050507;
+    --bg-color-rgb: 5, 5, 7;
+    --card-bg-base: #0b0b0d;
+    --card-bg-base-rgb: 11, 11, 13;
 
     /* Border colors */
-    --border-color: rgba(255, 255, 255, 0.08);
+    --border-color: rgba(255, 255, 255, 0.04);
     --border-color-rgb: 255, 255, 255;
-    --border-hover-color: rgba(255, 255, 255, 0.15);
+    --border-hover-color: rgba(255, 255, 255, 0.08);
 
     /* Text colors */
-    --text-color: #f5f5f5;
-    --text-secondary-color: #a1a1aa;
-    --text-tertiary-color: #71717a;
+    --text-color: #f1f5f9;
+    --text-secondary-color: #94a3b8;
+    --text-tertiary-color: #475569;
 
     /* Spacing */
     --space-1: 4px;
@@ -49,7 +49,7 @@
     --transition-speed-fast: 0.15s;
 
     /* Glow */
-    --glow-color-rgb: 167, 139, 250;
+    --glow-color-rgb: 139, 92, 246;
 }
 
 /* ========================================
@@ -168,9 +168,9 @@
     width: 100%;
     padding: 0.875rem 1.5rem;
     margin-top: 1rem;
-    background: linear-gradient(135deg, var(--accent-purple), rgba(var(--accent-blue-rgb), 0.8));
-    border: 1px solid rgba(var(--accent-purple-rgb), 0.5);
-    border-radius: var(--border-radius-md);
+    background: var(--accent-purple);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--border-radius-lg);
     color: white;
     font-weight: 600;
     font-size: 0.9rem;
@@ -180,16 +180,18 @@
     justify-content: center;
     gap: 0.5rem;
     transition: all var(--transition-speed);
-    box-shadow: 0 4px 12px rgba(var(--accent-purple-rgb), 0.25);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .btn-primary:hover {
+    background: #9d76fa;
     transform: translateY(-1px);
-    box-shadow: 0 6px 20px rgba(var(--accent-purple-rgb), 0.35);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
 }
 
 .btn-primary:active {
     transform: translateY(1px);
+    background: #7c3aed;
 }
 
 /* ========================================
@@ -337,11 +339,12 @@
    ======================================== */
 
 .message-card {
-    background: rgba(var(--bg-color-rgb), 0.3);
-    border: 1px solid var(--border-color);
-    border-radius: var(--border-radius-md);
+    background: rgba(var(--card-bg-base-rgb), 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: var(--border-radius-lg);
     padding: var(--space-4);
     animation: slideIn 0.3s ease-out;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
 }
 
 @keyframes slideIn {
@@ -357,23 +360,23 @@
 }
 
 .message-card.agent-message {
-    background: rgba(var(--accent-purple-rgb), 0.05);
-    border-color: rgba(var(--accent-purple-rgb), 0.2);
+    background: rgba(var(--accent-purple-rgb), 0.08);
+    border-color: rgba(var(--accent-purple-rgb), 0.45);
 }
 
 .message-card.system-message {
-    background: rgba(var(--accent-green-rgb), 0.05);
-    border-color: rgba(var(--accent-green-rgb), 0.2);
+    background: rgba(var(--accent-green-rgb), 0.08);
+    border-color: rgba(var(--accent-green-rgb), 0.45);
 }
 
 .message-card.system-error {
-    background: rgba(var(--accent-pink-rgb), 0.05);
-    border-color: rgba(var(--accent-pink-rgb), 0.2);
+    background: rgba(var(--accent-pink-rgb), 0.08);
+    border-color: rgba(var(--accent-pink-rgb), 0.45);
 }
 
 .message-card.thinking-card {
-    background: rgba(var(--accent-yellow-rgb), 0.05);
-    border-color: rgba(var(--accent-yellow-rgb), 0.25);
+    background: rgba(var(--accent-yellow-rgb), 0.08);
+    border-color: rgba(var(--accent-yellow-rgb), 0.5);
 }
 
 /* Message header */
@@ -637,9 +640,9 @@
    ======================================== */
 
 .thought-card {
-    background: rgba(var(--accent-yellow-rgb), 0.04);
-    border: 1px solid rgba(var(--accent-yellow-rgb), 0.25);
-    border-radius: var(--border-radius-md);
+    background: rgba(var(--accent-yellow-rgb), 0.08);
+    border: 1px solid rgba(var(--accent-yellow-rgb), 0.45);
+    border-radius: var(--border-radius-lg);
     overflow: hidden;
 }
 

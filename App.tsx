@@ -12,7 +12,6 @@ import {
 } from './types';
 import {
     runCodeAgent,
-    runGapFinder,
     runEditorStepRaw,
     runEditorStepStreaming
 } from './services/gemini';
@@ -20,7 +19,6 @@ import { applyMultiEdit, readFile, formatCodeWithLineNumbers } from './utils/edi
 import CodePreview, { CodePreviewHandle } from './components/CodePreview';
 import DiffViewer from './components/DiffViewer';
 import { ArtifactGallery } from './components/ArtifactGallery';
-import { HistoryPanel } from './components/HistoryPanel';
 import { PROMPTS } from './constants';
 
 // Icons from react-icons
@@ -171,7 +169,7 @@ export default function App() {
         });
         const pending = todos.filter(t => t.status !== 'done').length;
         const done = todos.filter(t => t.status === 'done').length;
-        return `[TODO LIST] ${done}/${todos.length} complete\n${lines.join('\n')}${pending > 0 ? `\n>> ${pending} pending - complete before verify_changes` : '\n>> All done - ready to verify'}`;
+        return `[TODO LIST] ${done}/${todos.length} complete\n${lines.join('\n')}${pending > 0 ? `\n>> ${pending} pending - complete all before calling exit` : '\n>> All done - ready to exit'}`;
     };
 
 
@@ -272,39 +270,6 @@ export default function App() {
         }
     };
 
-    const manageVerifierHistory = (history: any[], newCode: string, newScreenshot: string | null, newRecording: string | null) => {
-        const newHistory = [...history];
-
-        newHistory.forEach(part => {
-            if (part.role === 'user') {
-                if (Array.isArray(part.parts)) {
-                    part.parts.forEach((p: any) => {
-                        if (p.text && p.text.startsWith('<!DOCTYPE html>')) {
-                            p.text = '[Previous HTML Code removed to save context]';
-                        }
-                    });
-                }
-            }
-        });
-
-        const newTurnParts: any[] = [
-            { text: "Here is the latest code and visual state." },
-            { text: newCode }
-        ];
-        if (newScreenshot) {
-            newTurnParts.push({ text: "Latest Multi-Angle Screenshot:" });
-            newTurnParts.push({ inlineData: { mimeType: 'image/png', data: newScreenshot } });
-        } else {
-            newTurnParts.push({ text: "Screenshot failed to capture (possible runtime error)." });
-        }
-        if (newRecording) {
-            newTurnParts.push({ text: "Scene Recording (orbit view - watch for lighting, materials, and geometry from all angles):" });
-            newTurnParts.push({ inlineData: { mimeType: 'video/webm', data: newRecording } });
-        }
-
-        newHistory.push({ role: 'user', parts: newTurnParts });
-        return newHistory;
-    };
 
     const prepareHistoryForNextStep = (history: any[], currentCode: string) => {
         // 1. Strip all existing [CURRENT HTML] blocks from intermediate messages in the history (index > 0)
@@ -357,6 +322,7 @@ export default function App() {
         let loopCode = startCode;
         let iteration = 0;
         const maxIterations = 20;
+        let loopVerified = false;
 
         const dims = await getImgDims(originalImg);
 
@@ -371,369 +337,478 @@ export default function App() {
             console.error("Failed to save reference image to sandbox:", e);
         }
 
+        // Set viewMode to preview and wait for compile/render before taking startup captures
+        if (viewMode !== 'preview') setViewMode('preview');
+        addLog(AgentType.SYSTEM, "Rendering initial generated scene and capturing startup assets...", 'info');
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Capture startup screenshot and recording of current scene state
+        const startupScreenshot = await previewRef.current?.takeScreenshot();
+        const startupRecording = await previewRef.current?.recordScene();
+
+        // Add startup recording to artifacts for UI
+        if (startupRecording) {
+            const recId = `rec-editor-startup-${Date.now()}`;
+            setArtifacts(prev => [{
+                id: recId,
+                type: 'video',
+                url: startupRecording,
+                mimeType: 'video/webm',
+                description: `Initial Scene Recording`,
+                agent: AgentType.EDITOR
+            }, ...prev]);
+        }
+
+        // Upload startup visual check files to python sandbox
+        if (startupScreenshot) {
+            try {
+                await fetch('/api/save-media', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: 'screenshot_latest.png', base64: startupScreenshot })
+                });
+                await fetch('/api/save-media', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: `screenshot_iter_0.png`, base64: startupScreenshot })
+                });
+            } catch (e) {
+                console.error("Failed to save startup screenshot to sandbox:", e);
+            }
+        }
+        if (startupRecording) {
+            try {
+                await fetch('/api/save-media', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: 'recording_latest.webm', base64: startupRecording })
+                });
+                await fetch('/api/save-media', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename: `recording_iter_0.webm`, base64: startupRecording })
+                });
+            } catch (e) {
+                console.error("Failed to save startup recording to sandbox:", e);
+            }
+        }
+
+        // Build starting parts including visual feedback from the beginning
+        const initialParts: any[] = [
+            { text: PROMPTS.EDITOR_SYSTEM },
+            { text: `Original Reference Image (Dimensions: ${dims.width}x${dims.height} pixels):` },
+            { inlineData: { mimeType: 'image/png', data: originalImg } },
+            { text: `[INITIAL HTML - STARTING POINT]\n${formatCodeWithLineNumbers(startCode)}\n[END INITIAL HTML]\n\nThis is the INITIAL code you are starting with. The CURRENT/LATEST HTML will appear at the bottom of the conversation as you make edits.` }
+        ];
+
+        if (startupScreenshot || startupRecording) {
+            initialParts.push({ text: `\n[STARTUP VISUAL PREVIEW OF INITIAL GENERATED SCENE]\nHere is the initial rendered state of the scene before any refinement edits. Compare it closely with the Original Reference Image:` });
+            if (startupScreenshot) {
+                initialParts.push({ inlineData: { mimeType: 'image/png', data: startupScreenshot } });
+            }
+            if (startupRecording) {
+                initialParts.push({ inlineData: { mimeType: 'video/webm', data: startupRecording } });
+            }
+        }
+
         let editorHistory: any[] = [
             {
                 role: 'user',
-                parts: [
-                    { text: PROMPTS.EDITOR_SYSTEM },
-                    { text: `Original Reference Image (Dimensions: ${dims.width}x${dims.height} pixels):` },
-                    { inlineData: { mimeType: 'image/png', data: originalImg } },
-                    { text: `[INITIAL HTML - STARTING POINT]\n${formatCodeWithLineNumbers(startCode)}\n[END INITIAL HTML]\n\nThis is the INITIAL code you are starting with. The CURRENT/LATEST HTML will appear at the bottom of the conversation as you make edits.` }
-                ]
-            }
-        ];
-
-        let verifierHistory: any[] = [
-            {
-                role: 'user',
-                parts: [
-                    { text: "Original Reference Image:" },
-                    { inlineData: { mimeType: 'image/png', data: originalImg } }
-                ]
+                parts: initialParts
             }
         ];
 
         while (isLoopingRef.current && iteration < maxIterations) {
             try {
                 iteration++;
-            addLog(AgentType.SYSTEM, `Refinement cycle ${iteration}`, 'info');
+                addLog(AgentType.SYSTEM, `Refinement cycle ${iteration}`, 'info');
 
-            if (viewMode !== 'preview') setViewMode('preview');
-            await new Promise(r => setTimeout(r, 2000));
+                // For subsequent iterations, capture the latest rendered state.
+                // For cycle 1, visual context is already captured and hydrated in the initial history above.
+                if (iteration > 1) {
+                    if (viewMode !== 'preview') setViewMode('preview');
+                    await new Promise(r => setTimeout(r, 2000));
 
-            // Capture screenshot and recording for supervisor review
-            const screenshot = await previewRef.current?.takeScreenshot();
-            addLog(AgentType.SYSTEM, "Capturing scene recording...", 'info');
-            const recording = await previewRef.current?.recordScene();
+                    // Capture screenshot and recording of current scene state
+                    const screenshot = await previewRef.current?.takeScreenshot();
+                    addLog(AgentType.SYSTEM, "Capturing scene recording...", 'info');
+                    const recording = await previewRef.current?.recordScene();
 
-            // Add recording to artifacts for UI
-            if (recording) {
-                const recId = `rec-supervisor-${iteration}-${Date.now()}`;
-                setArtifacts(prev => [{
-                    id: recId,
-                    type: 'video',
-                    url: recording,
-                    mimeType: 'video/webm',
-                    description: `Cycle ${iteration} Recording`,
-                    agent: AgentType.VERIFIER
-                }, ...prev]);
-            }
-
-            setStatus(WorkflowStatus.CRITIQUING);
-
-            let critique = "";
-            if (latestRuntimeErrorRef.current) {
-                critique = `CRITICAL RUNTIME ERROR: ${latestRuntimeErrorRef.current}. Fix this immediately.`;
-                addLog(AgentType.SYSTEM, "Runtime error detected", 'error');
-                latestRuntimeErrorRef.current = null;
-            } else {
-                addLog(AgentType.VERIFIER, "Reviewing scene against reference...", 'info');
-
-                verifierHistory = manageVerifierHistory(verifierHistory, loopCode, screenshot, recording);
-
-                critique = await runGapFinder(verifierHistory);
-
-                verifierHistory.push({ role: 'model', parts: [{ text: critique }] });
-                addLog(AgentType.VERIFIER, "Analysis complete", 'info', critique);
-            }
-
-            if (critique.includes("STATUS: DEPLOYABLE")) {
-                addLog(AgentType.VERIFIER, "Scene approved! Render matches reference.", 'success');
-                break;
-            }
-
-            editorHistory.push({
-                role: 'user',
-                parts: [{ text: `SUPERVISOR DIRECTIVES (Iteration ${iteration}):\n${critique}\n\nStart by creating a todo_list.\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]\n\n${buildTodoContextString(editorTodoRef.current)}` }]
-            });
-
-            setStatus(WorkflowStatus.EDITING);
-            let editorActive = true;
-            let editorSteps = 0;
-
-            while (editorActive && editorSteps < 20) {
-                editorSteps++;
-
-                const lastMsg = editorHistory[editorHistory.length - 1];
-                if (lastMsg.role === 'model') {
-                    editorHistory.push({
-                        role: 'user',
-                        parts: [{ text: `Continue.` }]
-                    });
-                }
-
-                // Prepare history: strip old intermediate HTML copies and inject the latest HTML version in the latest message
-                prepareHistoryForNextStep(editorHistory, loopCode);
-
-                // Use streaming for real-time thought updates
-                let modelText = "";
-                let functionCall: any = null;
-                let fullResponse: any = null;
-                setStreamingThought('');  // Reset streaming state
-
-                for await (const chunk of runEditorStepStreaming(editorHistory)) {
-                    if (chunk.type === 'thought') {
-                        modelText += chunk.content + "\n\n";
-                        setStreamingThought(prev => prev + chunk.content + "\n\n");
-                    } else if (chunk.type === 'text') {
-                        modelText += chunk.content + "\n";
-                        setStreamingThought(prev => prev + chunk.content + "\n");
-                    } else if (chunk.type === 'functionCall') {
-                        functionCall = chunk.content;
-                    } else if (chunk.type === 'done') {
-                        fullResponse = chunk.content;
+                    // Add recording to artifacts for UI
+                    if (recording) {
+                        const recId = `rec-editor-cycle-${iteration}-${Date.now()}`;
+                        setArtifacts(prev => [{
+                            id: recId,
+                            type: 'video',
+                            url: recording,
+                            mimeType: 'video/webm',
+                            description: `Cycle ${iteration} Recording`,
+                            agent: AgentType.EDITOR
+                        }, ...prev]);
                     }
 
-                    // Auto-scroll activity panel
-                    if (activityRef.current) {
-                        activityRef.current.scrollTop = activityRef.current.scrollHeight;
-                    }
-                }
-
-                // Clear streaming state and add to permanent log
-                setStreamingThought('');
-                if (modelText.trim()) addLog(AgentType.EDITOR, "Thinking...", 'thought', modelText);
-
-                const candidate = fullResponse?.candidates?.[0];
-                if (!candidate) break;
-
-                editorHistory.push({ role: 'model', parts: candidate.content.parts });
-
-                if (functionCall) {
-                    const fc = functionCall;
-                    const args = fc.args;
-                    const logId = addLog(AgentType.EDITOR, `${fc.name}`, 'tool_call', undefined, args);
-
-                    let resultMsg = "Tool executed.";
-                    let toolFailed = false;
-
-                    if (fc.name === 'multi_edit') {
-                        const res = applyMultiEdit(loopCode, args.operations || []);
-                        loopCode = res.newCode;
-                        resultMsg = res.msg;
-                        toolFailed = !res.success;
-                        if (res.success) {
-                            saveCodeVersion(loopCode, `Iter ${iteration}.${editorSteps}`);
-                            resultMsg = `${res.msg}\n\nEdits applied successfully. ${args.operations?.length || 0} operations completed. Use read_file if you need to verify specific lines.`;
-                            await new Promise(r => setTimeout(r, 500));
-                        }
-                    }
-                    else if (fc.name === 'read_file') {
-                        const content = readFile(loopCode, args.start_line, args.end_line);
-                        resultMsg = `Lines ${args.start_line || 1}-${args.end_line || 'End'}:\n${content.slice(-5000)}`;
-                    }
-                    else if (fc.name === 'todo_list') {
-                        const parts: string[] = [];
-                        if (args.clear) {
-                            setEditorTodo([]);
-                            editorTodoRef.current = [];
-                            parts.push('Cleared');
-                        }
-                        if (args.add_items) {
-                            const newItems = args.add_items.map((t: string) => ({ id: Math.random().toString(), text: t, status: 'pending' }));
-                            setEditorTodo(prev => [...prev, ...newItems]);
-                            editorTodoRef.current = [...editorTodoRef.current, ...newItems];
-                            parts.push(`+${args.add_items.length} items`);
-                        }
-                        if (args.update_items) {
-                            setEditorTodo(prev => {
-                                const next = [...prev];
-                                args.update_items.forEach((u: any) => {
-                                    if (u.index >= 0 && u.index < next.length) next[u.index].status = u.status;
-                                });
-                                editorTodoRef.current = next;
-                                return next;
-                            });
-                            parts.push(`Updated ${args.update_items.length}`);
-                        }
-                        resultMsg = `OK: ${parts.join(', ')}. ${buildTodoContextString(editorTodoRef.current)}`;
-                        // Add snapshot of todos to log for rendering
-                        args._todoSnapshot = [...editorTodoRef.current];
-                    }
-                    else if (fc.name === 'run_python_script') {
+                    // Upload visual check files to python sandbox
+                    if (screenshot) {
                         try {
-                            const res = await fetch('/api/run-python', {
+                            await fetch('/api/save-media', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ script: args.script })
+                                body: JSON.stringify({ filename: 'screenshot_latest.png', base64: screenshot })
                             });
-
-                            if (!res.ok) {
-                                throw new Error(`HTTP error! status: ${res.status}`);
-                            }
-
-                            const runResult = await res.json();
-
-                            // Construct tool response text
-                            let textResult = `Python script executed ${runResult.success ? 'successfully' : 'with errors'}.\n`;
-                            textResult += `Exit code: ${runResult.exitCode}\n\n`;
-                            if (runResult.stdout) {
-                                textResult += `[STDOUT]\n${runResult.stdout}\n[END STDOUT]\n\n`;
-                            }
-                            if (runResult.stderr) {
-                                textResult += `[STDERR]\n${runResult.stderr}\n[END STDERR]\n\n`;
-                            }
-                            if (runResult.files && runResult.files.length > 0) {
-                                textResult += `Generated output files: ${runResult.files.map((f: any) => f.filename).join(', ')}`;
-                            } else {
-                                textResult += `No output files generated.`;
-                            }
-
-                            resultMsg = textResult;
-                            args.script = args.script; // Store script in args for rendering in UI log
-                            args._runResult = runResult; // Store runResult in args for rendering in UI log
-
-                            // Push the function response
-                            editorHistory.push({
-                                role: 'function',
-                                parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: runResult.success } } }]
+                            await fetch('/api/save-media', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ filename: `screenshot_iter_${iteration}.png`, base64: screenshot })
                             });
-                            updateLogMetadata(logId, {
-                                _resultMsg: resultMsg,
-                                _success: runResult.success,
-                                _runResult: runResult
-                            });
-
-                            // If there are output files (images/videos), attach them to editorHistory as user role parts
-                            if (runResult.files && runResult.files.length > 0) {
-                                const fileParts: any[] = [
-                                    { text: `Here are the output files generated by the python script:` }
-                                ];
-                                for (const file of runResult.files) {
-                                    fileParts.push({
-                                        inlineData: {
-                                            mimeType: file.mimeType,
-                                            data: file.base64
-                                        }
-                                    });
-                                }
-                                editorHistory.push({
-                                    role: 'user',
-                                    parts: fileParts
-                                });
-                            }
-                            continue; // Skip standard function response pushing, we did it manually
-                        } catch (err: any) {
-                            resultMsg = `Failed to execute python script: ${err.message}`;
-                            toolFailed = true;
+                        } catch (e) {
+                            console.error("Failed to save screenshot to sandbox:", e);
                         }
                     }
-                    else if (fc.name === 'take_screenshot') {
-                        if (viewMode !== 'preview') setViewMode('preview');
-                        await new Promise(r => setTimeout(r, 2000));
+                    if (recording) {
+                        try {
+                            await fetch('/api/save-media', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ filename: 'recording_latest.webm', base64: recording })
+                            });
+                            await fetch('/api/save-media', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ filename: `recording_iter_${iteration}.webm`, base64: recording })
+                            });
+                        } catch (e) {
+                            console.error("Failed to save recording to sandbox:", e);
+                        }
+                    }
 
-                        if (latestRuntimeErrorRef.current) {
-                            resultMsg = `ERROR: Runtime Error prevents screenshot: ${latestRuntimeErrorRef.current}`;
-                            toolFailed = true;
-                            latestRuntimeErrorRef.current = null;
-                        } else {
-                            const shot = await previewRef.current?.takeScreenshot();
-                            const recording = await previewRef.current?.recordScene();
+                    let renderError = latestRuntimeErrorRef.current;
+                    latestRuntimeErrorRef.current = null;
 
-                            if (shot) {
-                                // Upload screenshot to sandbox
-                                try {
-                                    await fetch('/api/save-media', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ filename: `screenshot_latest.png`, base64: shot })
+                    if (renderError) {
+                        addLog(AgentType.SYSTEM, "Runtime error detected", 'error');
+                        editorHistory.push({
+                            role: 'user',
+                            parts: [{ text: `[CRITICAL RUNTIME ERROR DETECTED ON STARTUP/RELOAD]\nYour last applied code has a critical runtime error:\n${renderError}\n\nFix this immediately before proceeding. Start by planning with todo_list.\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]\n\n${buildTodoContextString(editorTodoRef.current)}` }]
+                        });
+                    } else {
+                        addLog(AgentType.SYSTEM, "Providing visual render files to Editor...", 'info');
+                        
+                        const startMsgParts: any[] = [
+                            { text: `[VISUAL FEEDBACK - Refinement Cycle ${iteration}]\nHere is the latest rendered screenshot and 15-second orbit video recording of your scene.\nCompare it closely to the original Reference Image and use your Python visual sandbox tools to crop, zoom, and inspect discrepancies. Identify missing details, alignments, and object counts to refine the code further.\n\nStart by updating or creating your todo_list.\n\n[CURRENT HTML - ALWAYS UP TO DATE]\n${formatCodeWithLineNumbers(loopCode)}\n[END CURRENT HTML]\n\n${buildTodoContextString(editorTodoRef.current)}` }
+                        ];
+                        if (screenshot) {
+                            startMsgParts.push({ inlineData: { mimeType: 'image/png', data: screenshot } });
+                        }
+                        if (recording) {
+                            startMsgParts.push({ inlineData: { mimeType: 'video/webm', data: recording } });
+                        }
+
+                        editorHistory.push({
+                            role: 'user',
+                            parts: startMsgParts
+                        });
+                    }
+                }
+
+                setStatus(WorkflowStatus.EDITING);
+                let editorActive = true;
+                let editorSteps = 0;
+
+                while (editorActive && editorSteps < 20) {
+                    editorSteps++;
+
+                    const lastMsg = editorHistory[editorHistory.length - 1];
+                    if (lastMsg.role === 'model') {
+                        editorHistory.push({
+                            role: 'user',
+                            parts: [{ text: `Continue.` }]
+                        });
+                    }
+
+                    // Prepare history: strip old intermediate HTML copies and inject the latest HTML version in the latest message
+                    prepareHistoryForNextStep(editorHistory, loopCode);
+
+                    // Use streaming for real-time thought updates
+                    let modelText = "";
+                    let functionCall: any = null;
+                    let fullResponse: any = null;
+                    setStreamingThought('');  // Reset streaming state
+
+                    for await (const chunk of runEditorStepStreaming(editorHistory)) {
+                        if (chunk.type === 'thought') {
+                            modelText += chunk.content + "\n\n";
+                            setStreamingThought(prev => prev + chunk.content + "\n\n");
+                        } else if (chunk.type === 'text') {
+                            modelText += chunk.content + "\n";
+                            setStreamingThought(prev => prev + chunk.content + "\n");
+                        } else if (chunk.type === 'functionCall') {
+                            functionCall = chunk.content;
+                        } else if (chunk.type === 'done') {
+                            fullResponse = chunk.content;
+                        }
+
+                        // Auto-scroll activity panel
+                        if (activityRef.current) {
+                            activityRef.current.scrollTop = activityRef.current.scrollHeight;
+                        }
+                    }
+
+                    // Clear streaming state and add to permanent log
+                    setStreamingThought('');
+                    if (modelText.trim()) addLog(AgentType.EDITOR, "Thinking...", 'thought', modelText);
+
+                    const candidate = fullResponse?.candidates?.[0];
+                    if (!candidate) break;
+
+                    editorHistory.push({ role: 'model', parts: candidate.content.parts });
+
+                    if (functionCall) {
+                        const fc = functionCall;
+                        const args = fc.args;
+                        const logId = addLog(AgentType.EDITOR, `${fc.name}`, 'tool_call', undefined, args);
+
+                        let resultMsg = "Tool executed.";
+                        let toolFailed = false;
+
+                        if (fc.name === 'multi_edit') {
+                            const res = applyMultiEdit(loopCode, args.operations || []);
+                            loopCode = res.newCode;
+                            resultMsg = res.msg;
+                            toolFailed = !res.success;
+                            if (res.success) {
+                                saveCodeVersion(loopCode, `Iter ${iteration}.${editorSteps}`);
+                                resultMsg = `${res.msg}\n\nEdits applied successfully. ${args.operations?.length || 0} operations completed.`;
+                                await new Promise(r => setTimeout(r, 500));
+                            }
+                        }
+                        else if (fc.name === 'read_file') {
+                            const content = readFile(loopCode, args.start_line, args.end_line);
+                            resultMsg = `Lines ${args.start_line || 1}-${args.end_line || 'End'}:\n${content.slice(-5000)}`;
+                        }
+                        else if (fc.name === 'todo_list') {
+                            const parts: string[] = [];
+                            if (args.clear) {
+                                setEditorTodo([]);
+                                editorTodoRef.current = [];
+                                parts.push('Cleared');
+                            }
+                            if (args.add_items) {
+                                const newItems = args.add_items.map((t: string) => ({ id: Math.random().toString(), text: t, status: 'pending' }));
+                                setEditorTodo(prev => [...prev, ...newItems]);
+                                editorTodoRef.current = [...editorTodoRef.current, ...newItems];
+                                parts.push(`+${args.add_items.length} items`);
+                            }
+                            if (args.update_items) {
+                                setEditorTodo(prev => {
+                                    const next = [...prev];
+                                    args.update_items.forEach((u: any) => {
+                                        if (u.index >= 0 && u.index < next.length) next[u.index].status = u.status;
                                     });
-                                    await fetch('/api/save-media', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ filename: `screenshot_iter_${iteration}.png`, base64: shot })
-                                    });
-                                } catch (e) {
-                                    console.error("Failed to save screenshot to sandbox:", e);
+                                    editorTodoRef.current = next;
+                                    return next;
+                                });
+                                parts.push(`Updated ${args.update_items.length}`);
+                            }
+                            resultMsg = `OK: ${parts.join(', ')}. ${buildTodoContextString(editorTodoRef.current)}`;
+                            // Add snapshot of todos to log for rendering
+                            args._todoSnapshot = [...editorTodoRef.current];
+                        }
+                        else if (fc.name === 'run_python_script') {
+                            try {
+                                const res = await fetch('/api/run-python', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ script: args.script })
+                                });
+
+                                if (!res.ok) {
+                                    throw new Error(`HTTP error! status: ${res.status}`);
                                 }
 
-                                // Upload recording to sandbox if available
-                                if (recording) {
+                                const runResult = await res.json();
+
+                                // Construct tool response text
+                                let textResult = `Python script executed ${runResult.success ? 'successfully' : 'with errors'}.\n`;
+                                textResult += `Exit code: ${runResult.exitCode}\n\n`;
+                                if (runResult.stdout) {
+                                    textResult += `[STDOUT]\n${runResult.stdout}\n[END STDOUT]\n\n`;
+                                }
+                                if (runResult.stderr) {
+                                    textResult += `[STDERR]\n${runResult.stderr}\n[END STDERR]\n\n`;
+                                }
+                                if (runResult.files && runResult.files.length > 0) {
+                                    textResult += `Generated output files: ${runResult.files.map((f: any) => f.filename).join(', ')}`;
+                                } else {
+                                    textResult += `No output files generated.`;
+                                }
+
+                                resultMsg = textResult;
+                                args.script = args.script; // Store script in args for rendering in UI log
+                                args._runResult = runResult; // Store runResult in args for rendering in UI log
+
+                                // Push the function response
+                                editorHistory.push({
+                                    role: 'function',
+                                    parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: runResult.success } } }]
+                                });
+                                updateLogMetadata(logId, {
+                                    _resultMsg: resultMsg,
+                                    _success: runResult.success,
+                                    _runResult: runResult
+                                });
+
+                                // If there are output files (images/videos), attach them to editorHistory as user role parts
+                                if (runResult.files && runResult.files.length > 0) {
+                                    const fileParts: any[] = [
+                                        { text: `Here are the output files generated by the python script:` }
+                                    ];
+                                    for (const file of runResult.files) {
+                                        fileParts.push({
+                                            inlineData: {
+                                                mimeType: file.mimeType,
+                                                data: file.base64
+                                            }
+                                        });
+                                    }
+                                    editorHistory.push({
+                                        role: 'user',
+                                        parts: fileParts
+                                    });
+                                }
+                                continue; // Skip standard function response pushing, we did it manually
+                            } catch (err: any) {
+                                resultMsg = `Failed to execute python script: ${err.message}`;
+                                toolFailed = true;
+                            }
+                        }
+                        else if (fc.name === 'take_screenshot') {
+                            if (viewMode !== 'preview') setViewMode('preview');
+                            await new Promise(r => setTimeout(r, 2000));
+
+                            if (latestRuntimeErrorRef.current) {
+                                resultMsg = `ERROR: Runtime Error prevents screenshot: ${latestRuntimeErrorRef.current}`;
+                                toolFailed = true;
+                                latestRuntimeErrorRef.current = null;
+                            } else {
+                                const shot = await previewRef.current?.takeScreenshot();
+                                const recording = await previewRef.current?.recordScene();
+
+                                if (shot) {
+                                    // Upload screenshot to sandbox
                                     try {
                                         await fetch('/api/save-media', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ filename: `recording_latest.webm`, base64: recording })
+                                            body: JSON.stringify({ filename: `screenshot_latest.png`, base64: shot })
                                         });
                                         await fetch('/api/save-media', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ filename: `recording_iter_${iteration}.webm`, base64: recording })
+                                            body: JSON.stringify({ filename: `screenshot_iter_${iteration}.png`, base64: shot })
                                         });
                                     } catch (e) {
-                                        console.error("Failed to save recording to sandbox:", e);
+                                        console.error("Failed to save screenshot to sandbox:", e);
                                     }
+
+                                    // Upload recording to sandbox if available
+                                    if (recording) {
+                                        try {
+                                            await fetch('/api/save-media', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ filename: `recording_latest.webm`, base64: recording })
+                                            });
+                                            await fetch('/api/save-media', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ filename: `recording_iter_${iteration}.webm`, base64: recording })
+                                            });
+                                        } catch (e) {
+                                            console.error("Failed to save recording to sandbox:", e);
+                                        }
+                                    }
+
+                                    // Add screenshot artifact
+                                    const artId = `shot-${Date.now()}`;
+                                    setArtifacts(prev => [{ id: artId, type: 'screenshot', url: shot, mimeType: 'image/png', description: `Check ${iteration}.${editorSteps}`, agent: AgentType.EDITOR }, ...prev]);
+
+                                    // Add recording artifact if available
+                                    if (recording) {
+                                        const recId = `rec-${Date.now()}`;
+                                        setArtifacts(prev => [{ id: recId, type: 'video', url: recording, mimeType: 'video/webm', description: `Check ${iteration}.${editorSteps} Recording`, agent: AgentType.EDITOR }, ...prev]);
+                                    }
+
+                                    editorHistory.push({
+                                        role: 'function',
+                                        parts: [{ functionResponse: { name: fc.name, response: { result: "Screenshot and recording captured. See next message." } } }]
+                                    });
+                                    updateLogMetadata(logId, {
+                                        _resultMsg: "Screenshot and recording captured.",
+                                        _success: true,
+                                        _screenshot: shot,
+                                        _recording: recording
+                                    });
+
+                                    // Build message parts with both screenshot and recording
+                                    const visualParts: any[] = [
+                                        { text: "Here is the visual result of your edit (screenshot + orbit recording). Does it match your expectation?" },
+                                        { inlineData: { mimeType: 'image/png', data: shot } }
+                                    ];
+                                    if (recording) {
+                                        visualParts.push({ inlineData: { mimeType: 'video/webm', data: recording } });
+                                    }
+
+                                    editorHistory.push({
+                                        role: 'user',
+                                        parts: visualParts
+                                    });
+                                    continue;
+                                } else {
+                                    resultMsg = "Screenshot failed (Empty canvas).";
+                                    toolFailed = true;
                                 }
-
-                                // Add screenshot artifact
-                                const artId = `shot-${Date.now()}`;
-                                setArtifacts(prev => [{ id: artId, type: 'screenshot', url: shot, mimeType: 'image/png', description: `Check ${iteration}.${editorSteps}`, agent: AgentType.EDITOR }, ...prev]);
-
-                                // Add recording artifact if available
-                                if (recording) {
-                                    const recId = `rec-${Date.now()}`;
-                                    setArtifacts(prev => [{ id: recId, type: 'video', url: recording, mimeType: 'video/webm', description: `Check ${iteration}.${editorSteps} Recording`, agent: AgentType.EDITOR }, ...prev]);
-                                }
-
-                                editorHistory.push({
-                                    role: 'function',
-                                    parts: [{ functionResponse: { name: fc.name, response: { result: "Screenshot and recording captured. See next message." } } }]
-                                });
-                                updateLogMetadata(logId, {
-                                    _resultMsg: "Screenshot and recording captured.",
-                                    _success: true,
-                                    _screenshot: shot,
-                                    _recording: recording
-                                });
-
-                                // Build message parts with both screenshot and recording
-                                const visualParts: any[] = [
-                                    { text: "Here is the visual result of your edit (screenshot + orbit recording). Does it match your expectation?" },
-                                    { inlineData: { mimeType: 'image/png', data: shot } }
-                                ];
-                                if (recording) {
-                                    visualParts.push({ inlineData: { mimeType: 'video/webm', data: recording } });
-                                }
-
-                                editorHistory.push({
-                                    role: 'user',
-                                    parts: visualParts
-                                });
-                                continue;
-                            } else {
-                                resultMsg = "Screenshot failed (Empty canvas).";
-                                toolFailed = true;
                             }
                         }
-                    }
-                    else if (fc.name === 'verify_changes') {
-                        const todos = editorTodoRef.current;
-                        const pending = todos.filter(t => t.status !== 'done');
+                        else if (fc.name === 'exit') {
+                            const todos = editorTodoRef.current;
+                            const pending = todos.filter(t => t.status !== 'done');
 
-                        if (todos.length === 0) {
-                            resultMsg = "DENIED: Create a todo_list first to plan your work.";
-                            toolFailed = true;
-                            addLog(AgentType.SYSTEM, "Blocked verify - no todo list", 'warning');
-                        } else if (pending.length > 0) {
-                            resultMsg = `DENIED: ${pending.length} tasks pending. Complete all todos first.\n${buildTodoContextString(todos)}`;
-                            toolFailed = true;
-                            addLog(AgentType.SYSTEM, "Blocked verify - pending tasks", 'warning');
-                        } else {
-                            editorActive = false;
-                            resultMsg = "OK: All tasks complete. Submitting for verification.";
+                            if (todos.length === 0) {
+                                resultMsg = "DENIED: You must create a todo_list and plan your work before exiting.";
+                                toolFailed = true;
+                                addLog(AgentType.SYSTEM, "Blocked exit - no todo list planned", 'warning');
+                            } else if (pending.length > 0) {
+                                resultMsg = `DENIED: You have ${pending.length} pending todo tasks that must be marked 'done' before exiting.\n${buildTodoContextString(todos)}`;
+                                toolFailed = true;
+                                addLog(AgentType.SYSTEM, "Blocked exit - pending todo tasks", 'warning');
+                            } else if (latestRuntimeErrorRef.current) {
+                                resultMsg = `DENIED: Your changes caused a critical compile or runtime error: ${latestRuntimeErrorRef.current}. You must fix this error before exiting.`;
+                                toolFailed = true;
+                                addLog(AgentType.SYSTEM, "Blocked exit - active runtime error", 'error');
+                                latestRuntimeErrorRef.current = null; // Clear it after informing
+                            } else {
+                                editorActive = false;
+                                loopVerified = true;
+                                resultMsg = "OK: Exiting visual refinement loop. Workflow completed successfully!";
+                                addLog(AgentType.SYSTEM, "Workflow completed and terminated via agent exit()", 'success');
+                            }
                         }
-                    }
 
-                    editorHistory.push({
-                        role: 'function',
-                        parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: !toolFailed } } }]
-                    });
-                    updateLogMetadata(logId, {
-                        _resultMsg: resultMsg,
-                        _success: !toolFailed
-                    });
+                        editorHistory.push({
+                            role: 'function',
+                            parts: [{ functionResponse: { name: fc.name, response: { result: resultMsg, success: !toolFailed } } }]
+                        });
+                        updateLogMetadata(logId, {
+                            _resultMsg: resultMsg,
+                            _success: !toolFailed
+                        });
+                    }
                 }
-            }
+
+                if (loopVerified) {
+                    addLog(AgentType.SYSTEM, "Refinement loop completed successfully!", 'success');
+                    break;
+                }
             } catch (err: any) {
                 console.error("Error in refinement loop iteration:", err);
                 addLog(AgentType.SYSTEM, `Refinement loop error: ${err.message || err}. Retrying in 10s...`, 'error');
@@ -885,17 +960,17 @@ export default function App() {
                                         <div key={idx} className="flex flex-col items-center p-2 bg-surface-2 rounded-lg border border-surface-3 w-full">
                                             <div className="text-xs text-gray-400 mb-1 font-mono">{file.filename} ({file.mimeType})</div>
                                             {isImage && (
-                                                <img 
-                                                    src={`data:${file.mimeType};base64,${file.base64}`} 
-                                                    style={{ maxWidth: '100%', maxHeight: '300px', objectFit: 'contain', borderRadius: '8px' }} 
+                                                <img
+                                                    src={`data:${file.mimeType};base64,${file.base64}`}
+                                                    style={{ maxWidth: '100%', maxHeight: '300px', objectFit: 'contain', borderRadius: '8px' }}
                                                     alt={file.filename}
                                                 />
                                             )}
                                             {isVideo && (
-                                                <video 
-                                                    src={`data:${file.mimeType};base64,${file.base64}`} 
+                                                <video
+                                                    src={`data:${file.mimeType};base64,${file.base64}`}
                                                     controls
-                                                    style={{ maxWidth: '100%', maxHeight: '300px', borderRadius: '8px' }} 
+                                                    style={{ maxWidth: '100%', maxHeight: '300px', borderRadius: '8px' }}
                                                 />
                                             )}
                                         </div>
@@ -936,7 +1011,7 @@ export default function App() {
                             </button>
                         )}
                     </div>
-                    
+
                     {isExpanded && log.metadata && (
                         <div className="p-3 bg-surface-1 border border-surface-3 rounded-lg m-2 text-xs font-mono text-text-secondary-color max-h-48 overflow-y-auto">
                             <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
@@ -957,25 +1032,25 @@ export default function App() {
                                 <div className="text-gray-400 font-bold mb-1.5 uppercase tracking-wider text-[0.65rem]">System Response Sent to LLM:</div>
                                 <pre className="overflow-x-auto whitespace-pre-wrap text-text-primary-color leading-relaxed">{log.metadata._resultMsg}</pre>
                             </div>
-                            
+
                             {log.metadata._screenshot && (
                                 <div className="flex flex-col items-center p-2 bg-surface-2 rounded-lg border border-surface-3 w-full">
                                     <div className="text-[0.65rem] text-gray-400 mb-1.5 font-mono uppercase tracking-wider">screenshot_latest.png (Render Viewport)</div>
-                                    <img 
-                                        src={`data:image/png;base64,${log.metadata._screenshot}`} 
-                                        style={{ maxWidth: '100%', maxHeight: '240px', objectFit: 'contain', borderRadius: '6px' }} 
+                                    <img
+                                        src={`data:image/png;base64,${log.metadata._screenshot}`}
+                                        style={{ maxWidth: '100%', maxHeight: '240px', objectFit: 'contain', borderRadius: '6px' }}
                                         alt="Tool Output Screenshot"
                                     />
                                 </div>
                             )}
-                            
+
                             {log.metadata._recording && (
                                 <div className="flex flex-col items-center p-2 bg-surface-2 rounded-lg border border-surface-3 w-full">
                                     <div className="text-[0.65rem] text-gray-400 mb-1.5 font-mono uppercase tracking-wider">recording_latest.webm (Orbit Video)</div>
-                                    <video 
-                                        src={`data:video/webm;base64,${log.metadata._recording}`} 
+                                    <video
+                                        src={`data:video/webm;base64,${log.metadata._recording}`}
                                         controls
-                                        style={{ maxWidth: '100%', maxHeight: '240px', borderRadius: '6px' }} 
+                                        style={{ maxWidth: '100%', maxHeight: '240px', borderRadius: '6px' }}
                                     />
                                 </div>
                             )}
@@ -1028,7 +1103,6 @@ export default function App() {
                         </div>
                         <div>
                             <h1>Iterative Visual Refinements</h1>
-                            <p>AI-Powered Scene Generation</p>
                         </div>
                     </div>
 
@@ -1067,7 +1141,7 @@ export default function App() {
                             className="btn-primary"
                         >
                             <HiPlay className="w-4 h-4" />
-                            Generate Voxel Scene
+                            Generate & Refine
                         </button>
                     )}
 
@@ -1118,49 +1192,6 @@ export default function App() {
             {/* Main Content */}
             <div className="main-panel">
 
-                {/* History Button (Top Right) */}
-                <div className="main-panel-controls">
-                    <button
-                        onClick={() => setShowHistory(true)}
-                        className="btn-control"
-                    >
-                        <HiClock className="w-4 h-4" />
-                        History
-                    </button>
-
-                    <div className="btn-group">
-                        {[
-                            { mode: 'preview', icon: HiEye, label: 'Preview' },
-                            { mode: 'code', icon: HiCode, label: 'Code' },
-                            { mode: 'diff', icon: HiSwitchHorizontal, label: 'Diff' },
-                        ].map(({ mode, icon: Icon, label }) => (
-                            <button
-                                key={mode}
-                                onClick={() => setViewMode(mode as ViewMode)}
-                                className={`btn-control ${viewMode === mode ? 'active' : ''}`}
-                                title={label}
-                            >
-                                <Icon className="w-4 h-4" />
-                            </button>
-                        ))}
-                    </div>
-                </div>
-
-                {/* History Floating Panel */}
-                {
-                    showHistory && (
-                        <HistoryPanel
-                            history={codeHistory}
-                            currentVersionId={viewingVersionId}
-                            onSelect={(id) => {
-                                setViewingVersionId(id);
-                                setViewMode('preview');
-                            }}
-                            onClose={() => setShowHistory(false)}
-                        />
-                    )
-                }
-
                 {/* Viewport */}
                 <div className="viewport">
                     <div className="viewport-main">
@@ -1191,6 +1222,18 @@ export default function App() {
                                     </div>
                                 )}
                             </>
+                        ) : status === WorkflowStatus.IDLE ? (
+                            <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4 p-8">
+                                <div className="p-4 bg-surface-2 rounded-2xl border border-surface-4 text-text-muted">
+                                    <HiPhotograph className="w-12 h-12 text-accent opacity-40" />
+                                </div>
+                                <div className="text-center max-w-sm">
+                                    <h3 className="text-sm font-semibold text-text-primary mb-1">No Active Scene</h3>
+                                    <p className="text-xs text-text-secondary leading-relaxed">
+                                        Upload a reference image on the left and start the refinement loop to reconstruct it as a 3D scene.
+                                    </p>
+                                </div>
+                            </div>
                         ) : (
                             <div className="flex flex-col items-center justify-center h-full text-text-muted gap-4">
                                 <div className="w-12 h-12 border-2 border-surface-4 border-t-accent rounded-full animate-spin" />
@@ -1199,16 +1242,80 @@ export default function App() {
                         )}
                     </div>
 
-                    {/* Artifacts */}
-                    <div className="h-36 border-t border-surface-4 pt-4 flex-shrink-0">
-                        <h3 className="text-xs font-medium text-text-muted uppercase tracking-wider mb-3">Screenshots</h3>
-                        {artifacts.length > 0 ? (
-                            <ArtifactGallery artifacts={artifacts} onSelect={setSelectedArtifact} />
-                        ) : (
-                            <div className="text-sm text-text-dim p-4 border border-dashed border-surface-4 rounded-lg text-center">
-                                Screenshots will appear here during refinement
+                    {/* Bottom Panels Grid */}
+                    <div className="h-48 border-t border-surface-4 pt-4 flex-shrink-0 grid grid-cols-12 gap-4">
+                        {/* Screenshots Column */}
+                        <div className="col-span-6 flex flex-col h-full overflow-hidden">
+                            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider mb-2">Screenshots</h3>
+                            <div className="flex-1 overflow-y-auto">
+                                {artifacts.length > 0 ? (
+                                    <ArtifactGallery artifacts={artifacts} onSelect={setSelectedArtifact} />
+                                ) : (
+                                    <div className="text-sm text-text-dim p-4 border border-dashed border-surface-4 rounded-lg text-center h-full flex items-center justify-center">
+                                        Screenshots will appear here during refinement
+                                    </div>
+                                )}
                             </div>
-                        )}
+                        </div>
+
+                        {/* History & Mode Selection Column */}
+                        <div className="col-span-6 flex flex-col h-full overflow-hidden border-l border-surface-4 pl-4">
+                            <div className="flex items-center justify-between mb-2">
+                                <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wider flex items-center gap-1.5">
+                                    <HiClock className="w-3.5 h-3.5 text-accent" /> History
+                                </h3>
+                                {/* View mode selector integrated directly here */}
+                                <div className="btn-group flex items-center p-0.5 bg-surface-2 rounded-lg border border-surface-4">
+                                    {[
+                                        { mode: 'preview', icon: HiEye, label: 'Preview' },
+                                        { mode: 'code', icon: HiCode, label: 'Code' },
+                                        { mode: 'diff', icon: HiSwitchHorizontal, label: 'Diff' },
+                                    ].map(({ mode, icon: Icon, label }) => (
+                                        <button
+                                            key={mode}
+                                            onClick={() => setViewMode(mode as ViewMode)}
+                                            className={`p-1.5 rounded-md transition-colors ${viewMode === mode ? 'bg-accent/20 text-accent border border-accent/40' : 'text-text-muted hover:text-text-primary'}`}
+                                            title={label}
+                                        >
+                                            <Icon className="w-3.5 h-3.5" />
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            {/* History list */}
+                            <div className="flex-1 overflow-x-auto overflow-y-hidden flex gap-2 pb-1 items-stretch">
+                                {codeHistory.length === 0 ? (
+                                    <div className="text-sm text-text-dim p-4 border border-dashed border-surface-4 rounded-lg text-center w-full flex items-center justify-center">
+                                        No history versions yet
+                                    </div>
+                                ) : (
+                                    codeHistory.map((version, idx) => (
+                                        <button
+                                            key={version.id}
+                                            onClick={() => {
+                                                setViewingVersionId(version.id);
+                                            }}
+                                            className={`flex-shrink-0 w-32 p-2 rounded-lg border text-left flex flex-col justify-between transition-all ${viewingVersionId === version.id
+                                                    ? 'border-accent bg-accent/10 shadow-lg shadow-accent/5'
+                                                    : 'border-surface-4 hover:border-surface-3 bg-surface-2'
+                                                }`}
+                                        >
+                                            <div className="flex items-center justify-between w-full mb-1">
+                                                <span className={`text-[10px] font-bold ${viewingVersionId === version.id ? 'text-accent' : 'text-text-secondary'}`}>
+                                                    v{codeHistory.length - idx}
+                                                </span>
+                                                <span className="text-[9px] text-text-dim">
+                                                    {new Date(version.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                                </span>
+                                            </div>
+                                            <div className="text-[10px] text-text-muted line-clamp-2 leading-snug">
+                                                {version.description}
+                                            </div>
+                                        </button>
+                                    ))
+                                )}
+                            </div>
+                        </div>
                     </div>
                 </div>
 

@@ -189,23 +189,6 @@ export async function runCodeAgent(
   }, "CodeAgent");
 }
 
-// --- Agent 2: Gap Finder / Verifier (History Aware) ---
-export async function runGapFinder(
-  history: any[]
-): Promise<string> {
-  return withRetry(async () => {
-    const ai = getAiClient();
-
-    const response = await ai.models.generateContent({
-      model: MODEL_TEXT,
-      contents: history,
-      config: {
-        systemInstruction: PROMPTS.GAP_FINDER
-      }
-    });
-    return response.text || "No critique generated.";
-  }, "GapFinder");
-}
 
 // --- Agent 3: Editor Agent Tools ---
 const editorTools: FunctionDeclaration[] = [
@@ -272,14 +255,6 @@ const editorTools: FunctionDeclaration[] = [
     }
   },
   {
-    name: 'verify_changes',
-    description: 'Submit the final code to the Supervisor once it is fully complete and all todo items are marked "done".',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {}
-    }
-  },
-  {
     name: 'run_python_script',
     description: 'Execute a python script in the sandboxed workspace folder to perform image/video processing, comparison, analysis, crops, or custom transformations. Available libraries: cv2 (OpenCV), PIL (Pillow), numpy, scipy, skimage (scikit-image), moviepy, matplotlib, seaborn, plotly, sklearn (scikit-learn), imageio, ffmpeg (ffmpeg-python), sympy, openpyxl, pywt (PyWavelets), albumentations, tifffile, simsimd, stringzilla. Files present: reference_image.png, screenshot_latest.png, screenshot_iter_[N].png, recording_latest.webm, recording_iter_[N].webm. Any output file saved in the current directory matching pattern "output_*.*" (e.g. output_diff.png, output_clip.webm) is automatically returned and attached to your history as a visual multimodal input.',
     parameters: {
@@ -295,7 +270,7 @@ const editorTools: FunctionDeclaration[] = [
   },
   {
     name: 'exit',
-    description: 'Exit the editing loop. Only use this if verify_changes returned STATUS: DEPLOYABLE.',
+    description: 'Exit the editing loop and complete the visual refinement loop. Use this once you are fully satisfied with the visual fidelity, all todo items are marked "done", and the scene has no runtime errors.',
     parameters: {
       type: Type.OBJECT,
       properties: {}
