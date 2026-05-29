@@ -193,20 +193,27 @@ export async function runCodeAgent(
 // --- Agent 3: Editor Agent Tools ---
 const editorTools: FunctionDeclaration[] = [
   {
-    name: 'multi_edit',
-    description: 'Apply one or more search-and-replace edits to the active scene file. Set replace_str to an empty string to delete code.',
+    name: 'search_and_replace',
+    description: 'Apply one or more search-and-replace edits to the active scene file. Recommended to bundle all changes here.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         operations: {
           type: Type.ARRAY,
+          description: 'List of search-and-replace operations, executed in order',
           items: {
             type: Type.OBJECT,
             properties: {
-              search_str: { type: Type.STRING, description: 'The exact string of code in the file to find. This must match exactly once in the file, including whitespace/indentation.' },
-              replace_str: { type: Type.STRING, description: 'The replacement string of code to substitute in. Use an empty string to delete the matched search_str.' }
+              search_block: {
+                type: Type.STRING,
+                description: 'The EXACT block of code to find in the file. Must match exactly, including indentation and spacing.'
+              },
+              replace_block: {
+                type: Type.STRING,
+                description: 'The replacement block of code. Use an empty string to delete.'
+              }
             },
-            required: ['search_str', 'replace_str']
+            required: ['search_block', 'replace_block']
           }
         }
       },
@@ -215,7 +222,7 @@ const editorTools: FunctionDeclaration[] = [
   },
   {
     name: 'read_file',
-    description: 'Read a specific range of lines from the current code. Example: { start_line: 100, end_line: 150 }.',
+    description: 'Read a specific range of lines or the entire current code file to inspect the latest code state, as the system does not automatically append the updated HTML to the history. Example: { start_line: 100, end_line: 150 }.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -269,6 +276,20 @@ const editorTools: FunctionDeclaration[] = [
     }
   },
   {
+    name: 'progress_so_far',
+    description: 'Document your progress so far when requested by the system (i.e. at iteration 20). Provide a very detailed report (about 8 to 9 paragraphs). Once you submit this report, your previous history will be cleared, and you will receive the current scene screen recording + full current HTML file + current todo list + this progress report.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        report: {
+          type: Type.STRING,
+          description: 'The full, detailed progress report (8-9 paragraphs).'
+        }
+      },
+      required: ['report']
+    }
+  },
+  {
     name: 'exit',
     description: 'Exit the editing loop and complete the visual refinement loop. Use this once you are fully satisfied with the visual fidelity, all todo items are marked "done", and the scene has no runtime errors.',
     parameters: {
@@ -313,7 +334,7 @@ export async function* runEditorStepStreaming(
     config: {
       tools: [{ functionDeclarations: editorTools }],
       thinkingConfig: {
-        thinkingLevel: ThinkingLevel.HIGH,
+        thinkingLevel: ThinkingLevel.MINIMAL,
         includeThoughts: true
       }
     }

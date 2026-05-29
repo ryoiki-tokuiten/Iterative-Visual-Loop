@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap"
     rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -16,29 +16,29 @@
       theme: {
         extend: {
           colors: {
-            // Professional zinc-based palette
+            // Obsidian-based palette
             surface: {
-              0: '#0a0a0b',
-              1: '#0f0f10',
-              2: '#18181b',
-              3: '#27272a',
-              4: '#3f3f46'
+              0: '#08080a', // Obsidian dark bg
+              1: '#0f0f13', // Surface panel bg
+              2: '#121217', // Alternate panel bg
+              3: '#22222a', // Border bg
+              4: '#3f3f4e'  // Active border bg / wall
             },
             accent: {
-              DEFAULT: '#10b981',
-              muted: '#059669',
-              subtle: 'rgba(16, 185, 129, 0.1)'
+              DEFAULT: '#00e599', // Obsidian Accent Green
+              muted: '#00b377',
+              subtle: 'rgba(0, 229, 153, 0.1)'
             },
             text: {
-              primary: '#fafafa',
-              secondary: '#a1a1aa',
-              muted: '#71717a',
-              dim: '#52525b'
+              primary: '#e2e8f0', // Text main
+              secondary: '#a1aab5', // Text muted
+              muted: '#64748b',
+              dim: '#475569'
             }
           },
           fontFamily: {
-            sans: ['Inter', 'system-ui', 'sans-serif'],
-            mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+            sans: ['"Google Sans"', 'Inter', 'system-ui', 'sans-serif'],
+            mono: ['"Fira Code"', 'monospace'],
           },
           animation: {
             'fade-in': 'fadeIn 0.2s ease-out',
@@ -69,9 +69,9 @@
     }
 
     body {
-      background-color: #0a0a0b;
-      color: #fafafa;
-      font-family: 'Inter', system-ui, sans-serif;
+      background-color: #08080a;
+      color: #e2e8f0;
+      font-family: "Google Sans", "Inter", sans-serif;
     }
 
     /* Custom Scrollbar */

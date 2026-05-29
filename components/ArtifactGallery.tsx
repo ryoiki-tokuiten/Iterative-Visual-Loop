@@ -16,7 +16,7 @@ export const ArtifactGallery: React.FC<ArtifactGalleryProps> = ({ artifacts, onS
       {artifacts.map((art) => (
         <div
           key={art.id}
-          className="relative group flex-shrink-0 rounded-lg overflow-hidden border border-surface-4 cursor-pointer hover:border-accent transition-colors"
+          className="relative group flex-shrink-0 rounded-lg overflow-hidden border border-surface-3 cursor-pointer hover:border-accent transition-colors"
           onClick={() => onSelect(art)}
         >
           {art.type === 'video' ? (

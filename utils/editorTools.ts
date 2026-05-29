@@ -1,15 +1,78 @@
+export const applySearchAndReplace = (
+  code: string,
+  operations: { search_block: string; replace_block: string }[]
+): {
+  newCode: string;
+  success: boolean;
+  msg: string;
+  opResults?: { search_block: string; replace_block: string; success: boolean; error?: string }[];
+} => {
+  if (!operations || operations.length === 0) {
+    return { newCode: code, success: false, msg: "No operations provided.", opResults: [] };
+  }
 
-export const applySearchAndReplace = (code: string, searchStr: string, replaceStr: string): { newCode: string; success: boolean; msg: string } => {
-  if (!code.includes(searchStr)) {
-    return { newCode: code, success: false, msg: `Search string not found. Make sure you are copying the exact text from the file, including whitespace and indentation.` };
+  let currentCode = code;
+  const successes: string[] = [];
+  const failures: string[] = [];
+  const opResults: { search_block: string; replace_block: string; success: boolean; error?: string }[] = [];
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    const searchBlock = op.search_block || '';
+    const replaceBlock = op.replace_block || '';
+
+    if (!searchBlock) {
+      const errMsg = "No search block provided.";
+      failures.push(`Step ${i + 1} Failed: ${errMsg}`);
+      opResults.push({ search_block: searchBlock, replace_block: replaceBlock, success: false, error: errMsg });
+      continue;
+    }
+
+    if (!currentCode.includes(searchBlock)) {
+      const errMsg = "Search block not found. Ensure you copy-pasted the exact lines and spacing.";
+      failures.push(`Step ${i + 1} Failed: ${errMsg}`);
+      opResults.push({ search_block: searchBlock, replace_block: replaceBlock, success: false, error: errMsg });
+      continue;
+    }
+
+    // Direct search and replace
+    currentCode = currentCode.replace(searchBlock, replaceBlock);
+    successes.push(`Step ${i + 1} Succeeded`);
+    opResults.push({ search_block: searchBlock, replace_block: replaceBlock, success: true });
   }
-  // Check for multiple occurrences
-  const count = code.split(searchStr).length - 1;
-  if (count > 1) {
-    return { newCode: code, success: false, msg: `Search string found ${count} times. Provide a longer, more unique search string that matches exactly once.` };
+
+  const total = operations.length;
+  const succeededCount = successes.length;
+  const failedCount = failures.length;
+
+  if (succeededCount === 0) {
+    return {
+      newCode: code,
+      success: false,
+      msg: `All ${total} edit(s) failed!\n\nDetails:\n${failures.join('\n')}`,
+      opResults
+    };
   }
-  const newCode = code.replace(searchStr, replaceStr);
-  return { newCode, success: true, msg: 'Edit applied.' };
+
+  if (failedCount === 0) {
+    return {
+      newCode: currentCode,
+      success: true,
+      msg: `Success: All ${total} edit(s) applied successfully.`,
+      opResults
+    };
+  }
+
+  // Partial success
+  return {
+    newCode: currentCode,
+    success: true, // Commit successfully matched edits to visual preview
+    msg: `PARTIAL SUCCESS: Successfully applied ${succeededCount} out of ${total} edits.\n\n` +
+         `=== SUCCESSFULLY APPLIED ===\n${successes.join('\n')}\n\n` +
+         `=== FAILED (NOT APPLIED) ===\n${failures.join('\n')}\n\n` +
+         `Note: Successfully matched edits have been applied. Please review the failed steps above and re-apply only those steps using the exact matching text.`,
+    opResults
+  };
 };
 
 export const readFile = (code: string, start?: number, end?: number): string => {
@@ -22,74 +85,10 @@ export const readFile = (code: string, start?: number, end?: number): string => 
 };
 
 /**
- * Format code with line numbers for context injection
- * This helps the editor know exact line numbers for insert_after/insert_before operations
+ * Format code with line numbers for context/reference
  */
 export const formatCodeWithLineNumbers = (code: string): string => {
   const lines = code.split('\n');
   const padding = String(lines.length).length;
   return lines.map((line, idx) => `${String(idx + 1).padStart(padding, ' ')} | ${line}`).join('\n');
-};
-
-export const applyMultiEdit = (code: string, operations: any[]): { newCode: string; success: boolean; msg: string } => {
-  if (!operations || operations.length === 0) {
-    return { newCode: code, success: false, msg: "No operations provided." };
-  }
-
-  let currentCode = code;
-  const successes: string[] = [];
-  const failures: string[] = [];
-
-  for (let i = 0; i < operations.length; i++) {
-    const op = operations[i];
-    const searchStr = op.search_str || op.old || op.find || '';
-    const replaceStr = op.replace_str || op.new || op.replacement || '';
-
-    if (!searchStr && !replaceStr) {
-      failures.push(`Step ${i + 1}: Both search and replace strings are empty.`);
-      continue;
-    }
-    if (!searchStr) {
-      failures.push(`Step ${i + 1}: No search string provided.`);
-      continue;
-    }
-
-    const res = applySearchAndReplace(currentCode, searchStr, replaceStr);
-    if (!res.success) {
-      failures.push(`Step ${i + 1} Failed: ${res.msg}`);
-    } else {
-      currentCode = res.newCode;
-      successes.push(`Step ${i + 1} Succeeded`);
-    }
-  }
-
-  const total = operations.length;
-  const succeededCount = successes.length;
-  const failedCount = failures.length;
-
-  if (succeededCount === 0) {
-    return {
-      newCode: code,
-      success: false,
-      msg: `All ${total} edit(s) failed!\n\nDetails:\n${failures.join('\n')}`
-    };
-  }
-
-  if (failedCount === 0) {
-    return {
-      newCode: currentCode,
-      success: true,
-      msg: `Success: All ${total} edit(s) applied successfully.`
-    };
-  }
-
-  // Partial success
-  return {
-    newCode: currentCode,
-    success: true, // Return true so that the successfully matched edits are committed and run!
-    msg: `PARTIAL SUCCESS: Successfully applied ${succeededCount} out of ${total} edits.\n\n` +
-         `=== SUCCESSFULLY APPLIED ===\n${successes.join('\n')}\n\n` +
-         `=== FAILED (NOT APPLIED) ===\n${failures.join('\n')}\n\n` +
-         `Note: The successfully matched edits have been saved and applied to the active file. Please review the failed steps above and re-apply only those steps using exact matching text.`
-  };
 };
